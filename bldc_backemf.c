@@ -57,16 +57,25 @@ setup_timer_pwm(void)
   ROM_GPIOPinWrite(GPIO_PORTG_BASE, GPIO_PIN_4, 0);
   ROM_GPIOPinWrite(GPIO_PORTG_BASE, GPIO_PIN_5, 0);
 
+  /*
+    We use TIMER4A, TIMER4B, TIMER5A to drive IN1, IN2, IN3 with PWM.
+    TIMER5B is used in dummy PWM mode just to trigger an interrupt at the
+    start of every PWM period - it does not seem possible(?) to get such an
+    interrupt from a PWM timer with a zero duty cycle (match=reload).
+  */
   ROM_TimerConfigure(TIMER4_BASE,
                      TIMER_CFG_SPLIT_PAIR|TIMER_CFG_A_PWM|TIMER_CFG_B_PWM);
   ROM_TimerConfigure(TIMER5_BASE,
-                     TIMER_CFG_SPLIT_PAIR|TIMER_CFG_A_PWM|TIMER_CFG_B_ONE_SHOT);
+                     TIMER_CFG_SPLIT_PAIR|TIMER_CFG_A_PWM|TIMER_CFG_B_PWM);
 
   ROM_TimerLoadSet(TIMER4_BASE, TIMER_BOTH, PWM_PERIOD-1);
-  ROM_TimerLoadSet(TIMER5_BASE, TIMER_A, PWM_PERIOD-1);
+  ROM_TimerLoadSet(TIMER5_BASE, TIMER_BOTH, PWM_PERIOD-1);
   ROM_TimerMatchSet(TIMER4_BASE, TIMER_A, PWM_PERIOD-2);
   ROM_TimerMatchSet(TIMER4_BASE, TIMER_B, PWM_PERIOD-2);
   ROM_TimerMatchSet(TIMER5_BASE, TIMER_A, PWM_PERIOD-2);
+  /* The dummy timer to get an interrupt can arbitrarily have 50% duty cycle. */
+  ROM_TimerMatchSet(TIMER5_BASE, TIMER_B, (PWM_PERIOD-1)/2);
+
   /*
     Set the MRSU bit in config register, so that we can change the PWM duty
     cycle on-the-fly, and the new value will take effect at the start of the
@@ -78,18 +87,25 @@ setup_timer_pwm(void)
   HWREG(TIMER4_BASE + TIMER_O_TAMR) |= TIMER_TAMR_TAMRSU | TIMER_TAMR_TAPLO;
   HWREG(TIMER4_BASE + TIMER_O_TBMR) |= TIMER_TBMR_TBMRSU | TIMER_TBMR_TBPLO;
   HWREG(TIMER5_BASE + TIMER_O_TAMR) |= TIMER_TAMR_TAMRSU | TIMER_TAMR_TAPLO;
+  HWREG(TIMER5_BASE + TIMER_O_TBMR) |= TIMER_TBMR_TBMRSU | TIMER_TBMR_TBPLO;
 
   ROM_IntMasterEnable();
   ROM_TimerControlEvent(TIMER4_BASE, TIMER_BOTH, TIMER_EVENT_POS_EDGE);
-  ROM_TimerControlEvent(TIMER5_BASE, TIMER_A, TIMER_EVENT_POS_EDGE);
-  ROM_TimerIntEnable(TIMER4_BASE, TIMER_CAPA_EVENT|TIMER_CAPB_EVENT);
-  ROM_TimerIntEnable(TIMER5_BASE, TIMER_CAPA_EVENT);
-  ROM_IntEnable(INT_TIMER4A);
-  ROM_IntEnable(INT_TIMER4B);
-  ROM_IntEnable(INT_TIMER5A);
+  ROM_TimerControlEvent(TIMER5_BASE, TIMER_BOTH, TIMER_EVENT_POS_EDGE);
+  if (0) {
+    /* We don't really need to enable these interrupts at the moment. */
+    ROM_TimerIntEnable(TIMER4_BASE, TIMER_CAPA_EVENT|TIMER_CAPB_EVENT);
+    ROM_TimerIntEnable(TIMER5_BASE, TIMER_CAPA_EVENT);
+    ROM_IntEnable(INT_TIMER4A);
+    ROM_IntEnable(INT_TIMER4B);
+    ROM_IntEnable(INT_TIMER5A);
+  }
+  /* Enable the dummy PWM timer to trigger interrupts. */
+  ROM_TimerIntEnable(TIMER5_BASE, TIMER_CAPB_EVENT);
+  ROM_IntEnable(INT_TIMER5B);
 
   ROM_TimerEnable(TIMER4_BASE, TIMER_BOTH);
-  ROM_TimerEnable(TIMER5_BASE, TIMER_A);
+  ROM_TimerEnable(TIMER5_BASE, TIMER_BOTH);
 
   /*
     Synchronise the timers.
@@ -107,9 +123,9 @@ setup_timer_pwm(void)
   */
   ROM_SysCtlPeripheralEnable(SYSCTL_PERIPH_TIMER0);
   HWREG(TIMER0_BASE+TIMER_O_SYNC) |=
-    (uint32_t)(TIMER_4A_SYNC|TIMER_4B_SYNC|TIMER_5A_SYNC);
+    (uint32_t)(TIMER_4A_SYNC|TIMER_4B_SYNC|TIMER_5A_SYNC|TIMER_5B_SYNC);
   HWREG(TIMER0_BASE+TIMER_O_SYNC) &=
-    ~(uint32_t)(TIMER_4A_SYNC|TIMER_4B_SYNC|TIMER_5A_SYNC);
+    ~(uint32_t)(TIMER_4A_SYNC|TIMER_4B_SYNC|TIMER_5A_SYNC|TIMER_5B_SYNC);
 }
 
 
@@ -197,6 +213,14 @@ IntHandlerTimer5A(void)
 {
   /* Clear the interrupt. */
   HWREG(TIMER5_BASE + TIMER_O_ICR) = TIMER_CAPA_EVENT;
+}
+
+
+void
+IntHandlerTimer5B(void)
+{
+  /* Clear the interrupt. */
+  HWREG(TIMER5_BASE + TIMER_O_ICR) = TIMER_CAPB_EVENT;
 
   motor_update();
 }
@@ -235,33 +259,33 @@ setup_commute(int32_t pa, int32_t pb, int32_t pc)
   if (pa == 0)
   {
     pa_enabled = 0;
-    hw_pa_duty(PWM_PERIOD-2);
+    hw_pa_duty(PWM_PERIOD-1);
   } else {
     pa_enabled = 1;
     if (pa < 0)
-      hw_pa_duty(PWM_PERIOD-2);
+      hw_pa_duty(PWM_PERIOD-1);
     else
       hw_pa_duty(current_pwm_match_value);
   }
 
   if (pb == 0) {
     pb_enabled = 0;
-    hw_pb_duty(PWM_PERIOD-2);
+    hw_pb_duty(PWM_PERIOD-1);
   } else {
     pb_enabled = 1;
     if (pb < 0)
-      hw_pb_duty(PWM_PERIOD-2);
+      hw_pb_duty(PWM_PERIOD-1);
     else
       hw_pb_duty(current_pwm_match_value);
   }
 
   if (pc == 0) {
     pc_enabled = 0;
-    hw_pc_duty(PWM_PERIOD-2);
+    hw_pc_duty(PWM_PERIOD-1);
   } else {
     pc_enabled = 1;
     if (pc < 0)
-      hw_pc_duty(PWM_PERIOD-2);
+      hw_pc_duty(PWM_PERIOD-1);
     else
       hw_pc_duty(current_pwm_match_value);
   }
