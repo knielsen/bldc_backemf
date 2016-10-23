@@ -8,12 +8,14 @@
 #include "inc/hw_ints.h"
 #include "inc/hw_timer.h"
 #include "inc/hw_nvic.h"
+#include "inc/hw_adc.h"
 #include "driverlib/gpio.h"
 #include "driverlib/rom.h"
 #include "driverlib/sysctl.h"
 #include "driverlib/uart.h"
 #include "driverlib/timer.h"
 #include "driverlib/interrupt.h"
+#include "driverlib/adc.h"
 
 #include "dbg.h"
 #include "led.h"
@@ -126,6 +128,104 @@ setup_timer_pwm(void)
     (uint32_t)(TIMER_4A_SYNC|TIMER_4B_SYNC|TIMER_5A_SYNC|TIMER_5B_SYNC);
   HWREG(TIMER0_BASE+TIMER_O_SYNC) &=
     ~(uint32_t)(TIMER_4A_SYNC|TIMER_4B_SYNC|TIMER_5A_SYNC|TIMER_5B_SYNC);
+}
+
+
+/*
+  We use ADC channels to measure the back-emf.
+    PE2   phase A   AIN1   (xlat2 on POV PCB)
+    PE3   phase B   AIN0   (blank2)
+    PB4   phase C   AIN10  (sclk2)
+    PD3   neutral   AIN4   (sin3)
+*/
+static void
+setup_adc(void)
+{
+  ROM_SysCtlPeripheralEnable(SYSCTL_PERIPH_ADC0);
+  ROM_SysCtlPeripheralEnable(SYSCTL_PERIPH_GPIOB);
+  ROM_SysCtlPeripheralEnable(SYSCTL_PERIPH_GPIOD);
+  ROM_SysCtlPeripheralEnable(SYSCTL_PERIPH_GPIOE);
+  ROM_GPIOPinTypeADC(GPIO_PORTB_BASE, GPIO_PIN_4);
+  ROM_GPIOPinTypeADC(GPIO_PORTD_BASE, GPIO_PIN_3);
+  ROM_GPIOPinTypeADC(GPIO_PORTE_BASE, GPIO_PIN_2);
+  ROM_GPIOPinTypeADC(GPIO_PORTE_BASE, GPIO_PIN_3);
+
+  ROM_ADCSequenceConfigure(ADC0_BASE, 3, ADC_TRIGGER_PROCESSOR, 0);
+  /* For now, just sample phase A. */
+  ROM_ADCSequenceStepConfigure(ADC0_BASE, 3, 0,
+                               ADC_CTL_CH0 | ADC_CTL_IE | ADC_CTL_END);
+  ROM_ADCSequenceEnable(ADC0_BASE, 3);
+}
+
+static void
+adc_start(void)
+{
+  ROM_ADCIntClear(ADC0_BASE, 3);
+  ROM_ADCProcessorTrigger(ADC0_BASE, 3);
+}
+
+
+static uint32_t
+adc_ready(void)
+{
+  return ROM_ADCIntStatus(ADC0_BASE, 3, false) ? 1 : 0;
+}
+
+
+static uint32_t
+adc_read(void)
+{
+  unsigned long tmp;
+  ROM_ADCSequenceDataGet(ADC0_BASE, 3, &tmp);
+  return tmp;
+}
+
+
+#define DBG_NUM_SAMPLES 12000
+static volatile uint16_t dbg_adc_samples[DBG_NUM_SAMPLES];
+static volatile uint32_t dbg_adc_idx = 0;
+
+static void
+dbg_add_sample(uint16_t sample)
+{
+  uint32_t l_idx = dbg_adc_idx;
+  if (l_idx < DBG_NUM_SAMPLES) {
+    dbg_adc_samples[l_idx++] = sample;
+    dbg_adc_idx = l_idx;
+  }
+}
+
+
+static void
+dbg_do_sample(void)
+{
+  static uint32_t dbg_called_before = 0;
+
+  if (dbg_called_before) {
+    if (adc_ready())
+      dbg_add_sample(adc_read());
+  }
+  else
+    dbg_called_before = 1;
+
+  adc_start();
+}
+
+
+static void
+dbg_dump_samples(void)
+{
+  uint32_t l_idx, i;
+
+  while ((l_idx = dbg_adc_idx) < DBG_NUM_SAMPLES)
+    ;
+
+  serial_output_str
+    ("-----------------------------------------------------------------------\r\n");
+  for (i = 0; i < l_idx; ++i)
+    println_uint32(dbg_adc_samples[i]);
+
+  dbg_adc_idx = 0;
 }
 
 
@@ -428,6 +528,9 @@ motor_update()
     }
   }
 
+  if (!motor_adjusting_speed)
+    dbg_do_sample();
+
   motor_tick = l_motor_tick + 1;
 }
 
@@ -452,6 +555,7 @@ int main()
   ROM_IntPrioritySet(INT_TIMER4B, 0 << 5);
   ROM_IntPrioritySet(INT_TIMER5A, 0 << 5);
 
+  setup_adc();
   setup_timer_pwm();
   setup_systick();
 
@@ -482,5 +586,7 @@ int main()
       cur_time = get_time();
     } while (((last_time - cur_time) & (time_period - 1)) < MCU_HZ/10);
     last_time = cur_time;
+
+    dbg_dump_samples();
   }
 }
