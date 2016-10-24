@@ -92,9 +92,7 @@ float_to_str(char *buf, float f, uint32_t dig_before, uint32_t dig_after)
   {
     a /= 10.0f;
     d = (uint32_t)(f / a);
-    if (leading_zero && d == 0 && a >= 10.0f)
-      *buf++ = ' ';
-    else
+    if (!(leading_zero && d == 0 && a >= 10.0f))
     {
       leading_zero = 0;
       *buf++ = '0' + d;
