@@ -72,9 +72,9 @@ setup_timer_pwm(void)
 
   ROM_TimerLoadSet(TIMER4_BASE, TIMER_BOTH, PWM_PERIOD-1);
   ROM_TimerLoadSet(TIMER5_BASE, TIMER_BOTH, PWM_PERIOD-1);
-  ROM_TimerMatchSet(TIMER4_BASE, TIMER_A, PWM_PERIOD-2);
-  ROM_TimerMatchSet(TIMER4_BASE, TIMER_B, PWM_PERIOD-2);
-  ROM_TimerMatchSet(TIMER5_BASE, TIMER_A, PWM_PERIOD-2);
+  ROM_TimerMatchSet(TIMER4_BASE, TIMER_A, PWM_PERIOD-1);
+  ROM_TimerMatchSet(TIMER4_BASE, TIMER_B, PWM_PERIOD-1);
+  ROM_TimerMatchSet(TIMER5_BASE, TIMER_A, PWM_PERIOD-1);
   /* The dummy timer to get an interrupt can arbitrarily have 50% duty cycle. */
   ROM_TimerMatchSet(TIMER5_BASE, TIMER_B, (PWM_PERIOD-1)/2);
 
@@ -142,6 +142,7 @@ static void
 setup_adc(void)
 {
   ROM_SysCtlPeripheralEnable(SYSCTL_PERIPH_ADC0);
+  ROM_SysCtlPeripheralEnable(SYSCTL_PERIPH_ADC1);
   ROM_SysCtlPeripheralEnable(SYSCTL_PERIPH_GPIOB);
   ROM_SysCtlPeripheralEnable(SYSCTL_PERIPH_GPIOD);
   ROM_SysCtlPeripheralEnable(SYSCTL_PERIPH_GPIOE);
@@ -155,38 +156,51 @@ setup_adc(void)
   ROM_ADCSequenceStepConfigure(ADC0_BASE, 3, 0,
                                ADC_CTL_CH0 | ADC_CTL_IE | ADC_CTL_END);
   ROM_ADCSequenceEnable(ADC0_BASE, 3);
+
+  /* Setup ADC1 for sampling the neutral point. */
+  ROM_ADCSequenceConfigure(ADC1_BASE, 3, ADC_TRIGGER_PROCESSOR, 0);
+  /* Sample neutral phase. */
+  ROM_ADCSequenceStepConfigure(ADC1_BASE, 3, 0,
+                               ADC_CTL_CH4 | ADC_CTL_IE | ADC_CTL_END);
+  ROM_ADCSequenceEnable(ADC1_BASE, 3);
+
 }
 
 static void
 adc_start(void)
 {
   ROM_ADCIntClear(ADC0_BASE, 3);
+  ROM_ADCIntClear(ADC1_BASE, 3);
   ROM_ADCProcessorTrigger(ADC0_BASE, 3);
+  ROM_ADCProcessorTrigger(ADC1_BASE, 3);
 }
 
 
 static uint32_t
 adc_ready(void)
 {
-  return ROM_ADCIntStatus(ADC0_BASE, 3, false) ? 1 : 0;
+  return ROM_ADCIntStatus(ADC0_BASE, 3, false) &&
+    ROM_ADCIntStatus(ADC1_BASE, 3, false) ?
+    1 : 0;
 }
 
 
-static uint32_t
+static int16_t
 adc_read(void)
 {
-  unsigned long tmp;
-  ROM_ADCSequenceDataGet(ADC0_BASE, 3, &tmp);
-  return tmp;
+  unsigned long phase, neutral;
+  ROM_ADCSequenceDataGet(ADC0_BASE, 3, &phase);
+  ROM_ADCSequenceDataGet(ADC1_BASE, 3, &neutral);
+  return (int16_t)phase - (int16_t)neutral;
 }
 
 
 #define DBG_NUM_SAMPLES 12000
-static volatile uint16_t dbg_adc_samples[DBG_NUM_SAMPLES];
+static volatile int16_t dbg_adc_samples[DBG_NUM_SAMPLES];
 static volatile uint32_t dbg_adc_idx = 0;
 
 static void
-dbg_add_sample(uint16_t sample)
+dbg_add_sample(int16_t sample)
 {
   uint32_t l_idx = dbg_adc_idx;
   if (l_idx < DBG_NUM_SAMPLES) {
@@ -204,6 +218,8 @@ dbg_do_sample(void)
   if (dbg_called_before) {
     if (adc_ready())
       dbg_add_sample(adc_read());
+    else
+      for (;;) ;
   }
   else
     dbg_called_before = 1;
@@ -222,8 +238,16 @@ dbg_dump_samples(void)
 
   serial_output_str
     ("-----------------------------------------------------------------------\r\n");
-  for (i = 0; i < l_idx; ++i)
-    println_uint32(dbg_adc_samples[i]);
+  for (i = 0; i < l_idx; ++i) {
+    int32_t diff = dbg_adc_samples[i];
+    /*
+      Resistor ladder with 10k and 2.2k ohm.
+      V = (10k+2.2k)/2.2k * V_measured
+      V_measured = adc_val/4095*3.3V
+    */
+    float voltage = ((10.0f+2.2f)/2.2f*3.3f/4095.0f)*(float)diff;
+    println_float(voltage, 2, 5);
+  }
 
   dbg_adc_idx = 0;
 }
@@ -356,8 +380,7 @@ static uint32_t pc_enabled = 0;
 static void
 setup_commute(int32_t pa, int32_t pb, int32_t pc)
 {
-  if (pa == 0)
-  {
+  if (pa == 0) {
     pa_enabled = 0;
     hw_pa_duty(PWM_PERIOD-1);
   } else {
@@ -528,7 +551,7 @@ motor_update()
     }
   }
 
-  if (!motor_adjusting_speed)
+  if (!motor_adjusting_speed && (dbg_adc_idx > 0 || (delta >= target && motor_commute_step == 0)))
     dbg_do_sample();
 
   motor_tick = l_motor_tick + 1;
@@ -554,6 +577,7 @@ int main()
   ROM_IntPrioritySet(INT_TIMER4A, 0 << 5);
   ROM_IntPrioritySet(INT_TIMER4B, 0 << 5);
   ROM_IntPrioritySet(INT_TIMER5A, 0 << 5);
+  ROM_IntPrioritySet(INT_TIMER5B, 0 << 5);
 
   setup_adc();
   setup_timer_pwm();
