@@ -169,10 +169,18 @@ setup_adc(void)
 static void
 adc_start(void)
 {
-  ROM_ADCIntClear(ADC0_BASE, 3);
-  ROM_ADCIntClear(ADC1_BASE, 3);
-  ROM_ADCProcessorTrigger(ADC0_BASE, 3);
-  ROM_ADCProcessorTrigger(ADC1_BASE, 3);
+  /*
+    For efficiency, let's just assume the ADC is done, don't check it.
+    So we don't need to clear the completion flag.
+    One PWM cycle of 50 kHz is plenty of time to do an ADC measurement.
+
+    ROM_ADCIntClear(ADC0_BASE, 3);
+    ROM_ADCIntClear(ADC1_BASE, 3);
+  */
+  // ROM_ADCProcessorTrigger(ADC0_BASE, 3);
+  HWREG(ADC0_BASE + ADC_O_PSSI) |= (1 << 3);
+  // ROM_ADCProcessorTrigger(ADC1_BASE, 3);
+  HWREG(ADC1_BASE + ADC_O_PSSI) |= (1 << 3);
 }
 
 
@@ -185,12 +193,14 @@ adc_ready(void)
 }
 
 
-static int16_t
+static inline int16_t
 adc_read(void)
 {
   unsigned long phase, neutral;
-  ROM_ADCSequenceDataGet(ADC0_BASE, 3, &phase);
-  ROM_ADCSequenceDataGet(ADC1_BASE, 3, &neutral);
+  // ROM_ADCSequenceDataGet(ADC0_BASE, 3, &phase);
+  phase = HWREG(ADC0_BASE + ADC_O_SSFIFO3);
+  // ROM_ADCSequenceDataGet(ADC1_BASE, 3, &neutral);
+  neutral = HWREG(ADC1_BASE + ADC_O_SSFIFO3);
   return (int16_t)phase - (int16_t)neutral;
 }
 
@@ -344,10 +354,10 @@ IntHandlerTimer5A(void)
 void
 IntHandlerTimer5B(void)
 {
+  motor_update();
+
   /* Clear the interrupt. */
   HWREG(TIMER5_BASE + TIMER_O_ICR) = TIMER_CAPB_EVENT;
-
-  motor_update();
 }
 
 
@@ -493,7 +503,6 @@ static volatile uint32_t motor_speed_change_start = 0;
 static volatile uint32_t motor_speed_change_end = 0;
 static volatile float motor_speed_start = 0.0f;
 static volatile float motor_speed_end = 0.0f;
-static uint32_t motor_adc_running = 0;
 
 
 /*
@@ -507,13 +516,16 @@ motor_update()
   float l_motor_cur_speed;
   uint32_t delta, target;
   int16_t adc_reading;
-  int l_adc_running;
 
-  l_adc_running = motor_adc_running;
-  if (l_adc_running)
-    adc_reading = adc_read();
-  else
-    motor_adc_running = 1;
+  /*
+    The very first adc reading will be garbage because we did not start any
+    ADC measurement yet.
+    We could start the first reading in the main loop (we don't want a check
+    on a flag here for efficiency). But it really doesn't matter, the first
+    many ADC measurements will be garbage anyway, as we are starting the motor
+    in open loop from stand-still.
+  */
+  adc_reading = adc_read();
   adc_start();
 
   /*
@@ -564,8 +576,7 @@ motor_update()
   }
 
   if (!motor_adjusting_speed &&
-      (dbg_adc_idx > 0 || (delta >= target && motor_commute_step == 0)) &&
-      l_adc_running)
+      (dbg_adc_idx > 0 || (delta >= target && motor_commute_step == 0)))
     dbg_add_sample(adc_reading);
 
   motor_tick = l_motor_tick + 1;
