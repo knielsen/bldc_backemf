@@ -210,6 +210,7 @@ dbg_add_sample(int16_t sample)
 }
 
 
+__attribute__ ((unused))
 static void
 dbg_do_sample(void)
 {
@@ -492,6 +493,8 @@ static volatile uint32_t motor_speed_change_start = 0;
 static volatile uint32_t motor_speed_change_end = 0;
 static volatile float motor_speed_start = 0.0f;
 static volatile float motor_speed_end = 0.0f;
+static uint32_t motor_adc_running = 0;
+
 
 /*
   Runs once at the start of every PWM period.
@@ -503,6 +506,15 @@ motor_update()
   uint32_t l_motor_tick;
   float l_motor_cur_speed;
   uint32_t delta, target;
+  int16_t adc_reading;
+  int l_adc_running;
+
+  l_adc_running = motor_adc_running;
+  if (l_adc_running)
+    adc_reading = adc_read();
+  else
+    motor_adc_running = 1;
+  adc_start();
 
   /*
     When switching commutation step, set the new PWM period (=duty cycle)
@@ -551,8 +563,10 @@ motor_update()
     }
   }
 
-  if (!motor_adjusting_speed && (dbg_adc_idx > 0 || (delta >= target && motor_commute_step == 0)))
-    dbg_do_sample();
+  if (!motor_adjusting_speed &&
+      (dbg_adc_idx > 0 || (delta >= target && motor_commute_step == 0)) &&
+      l_adc_running)
+    dbg_add_sample(adc_reading);
 
   motor_tick = l_motor_tick + 1;
 }
