@@ -102,6 +102,8 @@ setup_timer_pwm(void)
   /* Enable the periodic timer to trigger interrupts. */
   ROM_TimerIntEnable(TIMER5_BASE, TIMER_TIMB_TIMEOUT);
   ROM_IntEnable(INT_TIMER5B);
+  /* Let the periodic timer trigger start of ADC measurements. */
+  ROM_TimerControlTrigger(TIMER5_BASE, TIMER_B, 1);
 
   ROM_TimerEnable(TIMER4_BASE, TIMER_BOTH);
   ROM_TimerEnable(TIMER5_BASE, TIMER_BOTH);
@@ -155,7 +157,7 @@ setup_adc(void)
   HWREG(ADC0_BASE + ADC_O_PC) = 0x7;
   HWREG(ADC1_BASE + ADC_O_PC) = 0x7;
 
-  ROM_ADCSequenceConfigure(ADC0_BASE, ADC_SEQUENCER, ADC_TRIGGER_PROCESSOR, 0);
+  ROM_ADCSequenceConfigure(ADC0_BASE, ADC_SEQUENCER, ADC_TRIGGER_TIMER, 0);
   /* Sample the phase 8 times. */
   for (i = 0; i < 8; ++i)
     ROM_ADCSequenceStepConfigure(ADC0_BASE, ADC_SEQUENCER, i,
@@ -166,7 +168,7 @@ setup_adc(void)
   ROM_ADCSequenceEnable(ADC0_BASE, ADC_SEQUENCER);
 
   /* Setup ADC1 for sampling the neutral point. */
-  ROM_ADCSequenceConfigure(ADC1_BASE, ADC_SEQUENCER, ADC_TRIGGER_PROCESSOR, 0);
+  ROM_ADCSequenceConfigure(ADC1_BASE, ADC_SEQUENCER, ADC_TRIGGER_TIMER, 0);
   /* Sample neutral phase 8 times. */
   for (i = 0; i < 8; ++i)
     ROM_ADCSequenceStepConfigure(ADC1_BASE, ADC_SEQUENCER, i,
@@ -615,7 +617,7 @@ motor_update()
     without risk that they will be overwritten midway by the new, ongoing
     measurements.
   */
-  adc_start();
+  // adc_start();   // Triggered from timer 5B now.
 
   /*
     When switching commutation step, set the new PWM period (=duty cycle)
