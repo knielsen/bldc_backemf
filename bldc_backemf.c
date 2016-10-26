@@ -28,7 +28,7 @@
 /* Electric rotations per mechanical rotation. */
 #define ELECTRIC2MECHANICAL 6
 
-#define PWM_FREQ 50000
+#define PWM_FREQ 25000
 #define PWM_PERIOD (MCU_HZ/PWM_FREQ)
 
 /* L6234 adds 300 ns of deadtime. */
@@ -131,6 +131,8 @@ setup_timer_pwm(void)
 }
 
 
+#define ADC_SEQUENCER 0
+#define ADC_SEQUENCER_FIFO ADC_O_SSFIFO0
 /*
   We use ADC channels to measure the back-emf.
     PE2   phase A   AIN1   (xlat2 on POV PCB)
@@ -141,6 +143,8 @@ setup_timer_pwm(void)
 static void
 setup_adc(void)
 {
+  uint32_t i;
+
   ROM_SysCtlPeripheralEnable(SYSCTL_PERIPH_ADC0);
   ROM_SysCtlPeripheralEnable(SYSCTL_PERIPH_ADC1);
   ROM_SysCtlPeripheralEnable(SYSCTL_PERIPH_GPIOB);
@@ -150,20 +154,26 @@ setup_adc(void)
   ROM_GPIOPinTypeADC(GPIO_PORTD_BASE, GPIO_PIN_3);
   ROM_GPIOPinTypeADC(GPIO_PORTE_BASE, GPIO_PIN_2);
   ROM_GPIOPinTypeADC(GPIO_PORTE_BASE, GPIO_PIN_3);
+  /* Set 1 Msamples/second speed. */
+  HWREG(ADC0_BASE + ADC_O_PC) = 0x7;
+  HWREG(ADC1_BASE + ADC_O_PC) = 0x7;
 
-  ROM_ADCSequenceConfigure(ADC0_BASE, 3, ADC_TRIGGER_PROCESSOR, 0);
-  /* For now, just sample phase A. */
-  ROM_ADCSequenceStepConfigure(ADC0_BASE, 3, 0,
-                               ADC_CTL_CH0 | ADC_CTL_IE | ADC_CTL_END);
-  ROM_ADCSequenceEnable(ADC0_BASE, 3);
+  ROM_ADCSequenceConfigure(ADC0_BASE, ADC_SEQUENCER, ADC_TRIGGER_PROCESSOR, 0);
+  /* Sample the phase 8 times. */
+  for (i = 0; i < 8; ++i)
+    ROM_ADCSequenceStepConfigure(ADC0_BASE, ADC_SEQUENCER, i,
+                                 ADC_CTL_CH10 |
+                                 (i==7 ? (ADC_CTL_IE | ADC_CTL_END) : 0));
+  ROM_ADCSequenceEnable(ADC0_BASE, ADC_SEQUENCER);
 
   /* Setup ADC1 for sampling the neutral point. */
-  ROM_ADCSequenceConfigure(ADC1_BASE, 3, ADC_TRIGGER_PROCESSOR, 0);
-  /* Sample neutral phase. */
-  ROM_ADCSequenceStepConfigure(ADC1_BASE, 3, 0,
-                               ADC_CTL_CH4 | ADC_CTL_IE | ADC_CTL_END);
-  ROM_ADCSequenceEnable(ADC1_BASE, 3);
-
+  ROM_ADCSequenceConfigure(ADC1_BASE, ADC_SEQUENCER, ADC_TRIGGER_PROCESSOR, 0);
+  /* Sample neutral phase 8 times. */
+  for (i = 0; i < 8; ++i)
+    ROM_ADCSequenceStepConfigure(ADC1_BASE, ADC_SEQUENCER, i,
+                                 ADC_CTL_CH4 |
+                                 (i==7 ? ( ADC_CTL_IE | ADC_CTL_END) : 0));
+  ROM_ADCSequenceEnable(ADC1_BASE, ADC_SEQUENCER);
 }
 
 static void
@@ -177,18 +187,18 @@ adc_start(void)
     ROM_ADCIntClear(ADC0_BASE, 3);
     ROM_ADCIntClear(ADC1_BASE, 3);
   */
-  // ROM_ADCProcessorTrigger(ADC0_BASE, 3);
-  HWREG(ADC0_BASE + ADC_O_PSSI) |= (1 << 3);
-  // ROM_ADCProcessorTrigger(ADC1_BASE, 3);
-  HWREG(ADC1_BASE + ADC_O_PSSI) |= (1 << 3);
+  // ROM_ADCProcessorTrigger(ADC0_BASE, ADC_SEQUENCER);
+  HWREG(ADC0_BASE + ADC_O_PSSI) |= (1 << ADC_SEQUENCER);
+  // ROM_ADCProcessorTrigger(ADC1_BASE, ADC_SEQUENCER);
+  HWREG(ADC1_BASE + ADC_O_PSSI) |= (1 << ADC_SEQUENCER);
 }
 
 
 static uint32_t
 adc_ready(void)
 {
-  return ROM_ADCIntStatus(ADC0_BASE, 3, false) &&
-    ROM_ADCIntStatus(ADC1_BASE, 3, false) ?
+  return ROM_ADCIntStatus(ADC0_BASE, ADC_SEQUENCER, false) &&
+    ROM_ADCIntStatus(ADC1_BASE, ADC_SEQUENCER, false) ?
     1 : 0;
 }
 
@@ -197,10 +207,10 @@ static inline int16_t
 adc_read(void)
 {
   unsigned long phase, neutral;
-  // ROM_ADCSequenceDataGet(ADC0_BASE, 3, &phase);
-  phase = HWREG(ADC0_BASE + ADC_O_SSFIFO3);
-  // ROM_ADCSequenceDataGet(ADC1_BASE, 3, &neutral);
-  neutral = HWREG(ADC1_BASE + ADC_O_SSFIFO3);
+  // ROM_ADCSequenceDataGet(ADC0_BASE, ADC_SEQUENCER, &phase);
+  phase = HWREG(ADC0_BASE + ADC_SEQUENCER_FIFO);
+  // ROM_ADCSequenceDataGet(ADC1_BASE, ADC_SEQUENCER, &neutral);
+  neutral = HWREG(ADC1_BASE + ADC_SEQUENCER_FIFO);
   return (int16_t)phase - (int16_t)neutral;
 }
 
@@ -217,6 +227,22 @@ dbg_add_sample(int16_t sample)
     dbg_adc_samples[l_idx++] = sample;
     dbg_adc_idx = l_idx;
   }
+}
+
+
+static void
+dbg_add_samples(uint32_t count)
+{
+  uint32_t l_idx = dbg_adc_idx;
+  while (count > 0) {
+    int16_t sample;
+
+    sample = adc_read();
+    --count;
+    if (l_idx < DBG_NUM_SAMPLES)
+      dbg_adc_samples[l_idx++] = sample;
+  }
+  dbg_adc_idx = l_idx;
 }
 
 
@@ -379,10 +405,10 @@ get_time(void)
 }
 
 
-static const float damper = 0.05f;
+static const float damper = 0.20f;
 /* ToDo: Ability to dynamically vary the voltage by changing duty cycle. */
 static const uint32_t current_pwm_match_value = (PWM_PERIOD-DEADTIME) -
-  (uint32_t)(1.0f * (/*damper*/0.05f*(float)(PWM_PERIOD-2*DEADTIME)));
+  (uint32_t)(1.0f * (/*damper*/0.20f*(float)(PWM_PERIOD-2*DEADTIME)));
 
 static uint32_t pa_enabled = 0;
 static uint32_t pb_enabled = 0;
@@ -503,6 +529,8 @@ static volatile uint32_t motor_speed_change_start = 0;
 static volatile uint32_t motor_speed_change_end = 0;
 static volatile float motor_speed_start = 0.0f;
 static volatile float motor_speed_end = 0.0f;
+/* Flag set when we start dumping samples to dbg. */
+static uint32_t motor_adc_dbg = 0;
 
 
 /*
@@ -515,17 +543,15 @@ motor_update()
   uint32_t l_motor_tick;
   float l_motor_cur_speed;
   uint32_t delta, target;
-  int16_t adc_reading;
 
-  /*
-    The very first adc reading will be garbage because we did not start any
-    ADC measurement yet.
-    We could start the first reading in the main loop (we don't want a check
-    on a flag here for efficiency). But it really doesn't matter, the first
-    many ADC measurements will be garbage anyway, as we are starting the motor
-    in open loop from stand-still.
-  */
-  adc_reading = adc_read();
+  if (motor_adc_dbg)
+    dbg_add_samples(8);
+  else {
+    uint32_t i;
+    i = 8;
+    while (i--)
+      (void)adc_read();
+  }
   adc_start();
 
   /*
@@ -546,6 +572,8 @@ motor_update()
                             (l_motor_cur_speed*(float)ELECTRIC2MECHANICAL));
   if (delta >= target) {
     uint32_t l_step = motor_commute_step + 1;
+    uint32_t l_adjusting = motor_adjusting_speed;
+
     if (l_step == 6) {
       l_step = 0;
       ++motor_revolutions;
@@ -555,7 +583,7 @@ motor_update()
     motor_last_commute = l_motor_tick;
 
     /* Adjust speed, if appropriate. */
-    if (motor_adjusting_speed) {
+    if (l_adjusting) {
       uint32_t l_speed_change_start = motor_speed_change_start;
       uint32_t l_speed_change_end = motor_speed_change_end;
       uint32_t range = l_speed_change_end - l_speed_change_start;
@@ -573,11 +601,14 @@ motor_update()
       if (sofar >= range)
         motor_adjusting_speed = 0;
     }
-  }
 
-  if (!motor_adjusting_speed &&
-      (dbg_adc_idx > 0 || (delta >= target && motor_commute_step == 0)))
-    dbg_add_sample(adc_reading);
+    /*
+      Start dumping samples for debug once we have reached target speed and
+      the commutation reaches the starting commute step.
+    */
+    if (!l_adjusting && l_step == 0)
+      motor_adc_dbg = 1;
+  }
 
   motor_tick = l_motor_tick + 1;
 }
@@ -605,6 +636,9 @@ int main()
   ROM_IntPrioritySet(INT_TIMER5B, 0 << 5);
 
   setup_adc();
+  /* Let's get an initial set of ADC samples into the ADC fifo. */
+  adc_start();
+  ROM_SysCtlDelay(80*8);
   setup_timer_pwm();
   setup_systick();
 
