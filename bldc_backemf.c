@@ -61,22 +61,20 @@ setup_timer_pwm(void)
 
   /*
     We use TIMER4A, TIMER4B, TIMER5A to drive IN1, IN2, IN3 with PWM.
-    TIMER5B is used in dummy PWM mode just to trigger an interrupt at the
-    start of every PWM period - it does not seem possible(?) to get such an
-    interrupt from a PWM timer with a zero duty cycle (match=reload).
+    TIMER5B is used in periodic mode to trigger an interrupt at the start of
+    every PWM period - it does not seem possible(?) to get such an interrupt
+    from a PWM timer with a zero duty cycle (match=reload).
   */
   ROM_TimerConfigure(TIMER4_BASE,
                      TIMER_CFG_SPLIT_PAIR|TIMER_CFG_A_PWM|TIMER_CFG_B_PWM);
   ROM_TimerConfigure(TIMER5_BASE,
-                     TIMER_CFG_SPLIT_PAIR|TIMER_CFG_A_PWM|TIMER_CFG_B_PWM);
+                     TIMER_CFG_SPLIT_PAIR|TIMER_CFG_A_PWM|TIMER_CFG_B_PERIODIC);
 
   ROM_TimerLoadSet(TIMER4_BASE, TIMER_BOTH, PWM_PERIOD-1);
   ROM_TimerLoadSet(TIMER5_BASE, TIMER_BOTH, PWM_PERIOD-1);
   ROM_TimerMatchSet(TIMER4_BASE, TIMER_A, PWM_PERIOD-1);
   ROM_TimerMatchSet(TIMER4_BASE, TIMER_B, PWM_PERIOD-1);
   ROM_TimerMatchSet(TIMER5_BASE, TIMER_A, PWM_PERIOD-1);
-  /* The dummy timer to get an interrupt can arbitrarily have 50% duty cycle. */
-  ROM_TimerMatchSet(TIMER5_BASE, TIMER_B, (PWM_PERIOD-1)/2);
 
   /*
     Set the MRSU bit in config register, so that we can change the PWM duty
@@ -89,11 +87,10 @@ setup_timer_pwm(void)
   HWREG(TIMER4_BASE + TIMER_O_TAMR) |= TIMER_TAMR_TAMRSU | TIMER_TAMR_TAPLO;
   HWREG(TIMER4_BASE + TIMER_O_TBMR) |= TIMER_TBMR_TBMRSU | TIMER_TBMR_TBPLO;
   HWREG(TIMER5_BASE + TIMER_O_TAMR) |= TIMER_TAMR_TAMRSU | TIMER_TAMR_TAPLO;
-  HWREG(TIMER5_BASE + TIMER_O_TBMR) |= TIMER_TBMR_TBMRSU | TIMER_TBMR_TBPLO;
 
   ROM_IntMasterEnable();
   ROM_TimerControlEvent(TIMER4_BASE, TIMER_BOTH, TIMER_EVENT_POS_EDGE);
-  ROM_TimerControlEvent(TIMER5_BASE, TIMER_BOTH, TIMER_EVENT_POS_EDGE);
+  ROM_TimerControlEvent(TIMER5_BASE, TIMER_A, TIMER_EVENT_POS_EDGE);
   if (0) {
     /* We don't really need to enable these interrupts at the moment. */
     ROM_TimerIntEnable(TIMER4_BASE, TIMER_CAPA_EVENT|TIMER_CAPB_EVENT);
@@ -102,8 +99,8 @@ setup_timer_pwm(void)
     ROM_IntEnable(INT_TIMER4B);
     ROM_IntEnable(INT_TIMER5A);
   }
-  /* Enable the dummy PWM timer to trigger interrupts. */
-  ROM_TimerIntEnable(TIMER5_BASE, TIMER_CAPB_EVENT);
+  /* Enable the periodic timer to trigger interrupts. */
+  ROM_TimerIntEnable(TIMER5_BASE, TIMER_TIMB_TIMEOUT);
   ROM_IntEnable(INT_TIMER5B);
 
   ROM_TimerEnable(TIMER4_BASE, TIMER_BOTH);
@@ -398,7 +395,7 @@ void
 IntHandlerTimer5B(void)
 {
   /* Clear the interrupt. */
-  HWREG(TIMER5_BASE + TIMER_O_ICR) = TIMER_CAPB_EVENT;
+  HWREG(TIMER5_BASE + TIMER_O_ICR) = TIMER_TIMB_TIMEOUT;
 
   motor_update();
 }
