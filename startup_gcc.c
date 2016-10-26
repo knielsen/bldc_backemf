@@ -36,10 +36,11 @@ static void FaultISR(void);
 static void IntDefaultHandler(void);
 
 /* Interrupts */
+extern void IntHandlerTimer3A(void);
+extern void IntHandlerTimer3B(void);
 extern void IntHandlerTimer4A(void);
 extern void IntHandlerTimer4B(void);
 extern void IntHandlerTimer5A(void);
-extern void IntHandlerTimer5B(void);
 extern void IntHandlerADC0Seq0(void);
 extern void IntHandlerADC1Seq0(void);
 
@@ -118,8 +119,8 @@ void (* const g_pfnVectors[])(void) =
     IntDefaultHandler,                      // GPIO Port H
     IntDefaultHandler,                      // UART2 Rx and Tx
     IntDefaultHandler,                      // SSI1 Rx and Tx
-    IntDefaultHandler,                      // Timer 3 subtimer A
-    IntDefaultHandler,                      // Timer 3 subtimer B
+    IntHandlerTimer3A,                      // Timer 3 subtimer A
+    IntHandlerTimer3B,                      // Timer 3 subtimer B
     IntDefaultHandler,                      // I2C1 Master and Slave
     IntDefaultHandler,                      // Quadrature Encoder 1
     IntDefaultHandler,                      // CAN0
@@ -176,7 +177,7 @@ void (* const g_pfnVectors[])(void) =
     0,                                      // Reserved
     0,                                      // Reserved
     IntHandlerTimer5A,                      // Timer 5 subtimer A
-    IntHandlerTimer5B,                      // Timer 5 subtimer B
+    IntDefaultHandler,                      // Timer 5 subtimer B
     IntDefaultHandler,                      // Wide Timer 0 subtimer A
     IntDefaultHandler,                      // Wide Timer 0 subtimer B
     IntDefaultHandler,                      // Wide Timer 1 subtimer A

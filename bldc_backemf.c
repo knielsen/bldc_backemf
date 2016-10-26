@@ -44,6 +44,7 @@ static void motor_update(void);
 static void
 setup_timer_pwm(void)
 {
+  ROM_SysCtlPeripheralEnable(SYSCTL_PERIPH_TIMER3);
   ROM_SysCtlPeripheralEnable(SYSCTL_PERIPH_TIMER4);
   ROM_SysCtlPeripheralEnable(SYSCTL_PERIPH_TIMER5);
   ROM_SysCtlPeripheralEnable(SYSCTL_PERIPH_GPIOG);
@@ -61,20 +62,32 @@ setup_timer_pwm(void)
 
   /*
     We use TIMER4A, TIMER4B, TIMER5A to drive IN1, IN2, IN3 with PWM.
-    TIMER5B is used in periodic mode to trigger an interrupt at the start of
+
+    TIMER3A is used in periodic mode to trigger an interrupt at the start of
     every PWM period - it does not seem possible(?) to get such an interrupt
     from a PWM timer with a zero duty cycle (match=reload).
+
+    TIMER3A also triggers a one-shot TIMER3B, which in turn triggers start
+    of ADC measurements of the floating phase and the neutral. This way, the
+    exact start time of the measurements can be controlled. The best
+    measurements are obtained near the end of the duty cycle, when the current
+    in the windings has had time to stabilise, and there is still voltage on
+    the neutral to avoid ADC clipping a negative floating phase voltage.
   */
   ROM_TimerConfigure(TIMER4_BASE,
                      TIMER_CFG_SPLIT_PAIR|TIMER_CFG_A_PWM|TIMER_CFG_B_PWM);
   ROM_TimerConfigure(TIMER5_BASE,
-                     TIMER_CFG_SPLIT_PAIR|TIMER_CFG_A_PWM|TIMER_CFG_B_PERIODIC);
+                     TIMER_CFG_SPLIT_PAIR|TIMER_CFG_A_PWM|TIMER_CFG_B_ONE_SHOT);
+  ROM_TimerConfigure(TIMER3_BASE,
+                     TIMER_CFG_SPLIT_PAIR|TIMER_CFG_A_PERIODIC|TIMER_CFG_B_ONE_SHOT);
 
   ROM_TimerLoadSet(TIMER4_BASE, TIMER_BOTH, PWM_PERIOD-1);
-  ROM_TimerLoadSet(TIMER5_BASE, TIMER_BOTH, PWM_PERIOD-1);
+  ROM_TimerLoadSet(TIMER5_BASE, TIMER_A, PWM_PERIOD-1);
   ROM_TimerMatchSet(TIMER4_BASE, TIMER_A, PWM_PERIOD-1);
   ROM_TimerMatchSet(TIMER4_BASE, TIMER_B, PWM_PERIOD-1);
   ROM_TimerMatchSet(TIMER5_BASE, TIMER_A, PWM_PERIOD-1);
+  ROM_TimerLoadSet(TIMER3_BASE, TIMER_A, PWM_PERIOD-1);
+  ROM_TimerLoadSet(TIMER3_BASE, TIMER_B, 120);
 
   /*
     Set the MRSU bit in config register, so that we can change the PWM duty
@@ -88,6 +101,9 @@ setup_timer_pwm(void)
   HWREG(TIMER4_BASE + TIMER_O_TBMR) |= TIMER_TBMR_TBMRSU | TIMER_TBMR_TBPLO;
   HWREG(TIMER5_BASE + TIMER_O_TAMR) |= TIMER_TAMR_TAMRSU | TIMER_TAMR_TAPLO;
 
+  /* Set the TIMER3B to be started from TIMER3A timeout.*/
+  ROM_TimerControlWaitOnTrigger(TIMER3_BASE, TIMER_B, 1);
+
   ROM_IntMasterEnable();
   ROM_TimerControlEvent(TIMER4_BASE, TIMER_BOTH, TIMER_EVENT_POS_EDGE);
   ROM_TimerControlEvent(TIMER5_BASE, TIMER_A, TIMER_EVENT_POS_EDGE);
@@ -100,13 +116,21 @@ setup_timer_pwm(void)
     ROM_IntEnable(INT_TIMER5A);
   }
   /* Enable the periodic timer to trigger interrupts. */
-  ROM_TimerIntEnable(TIMER5_BASE, TIMER_TIMB_TIMEOUT);
-  ROM_IntEnable(INT_TIMER5B);
-  /* Let the periodic timer trigger start of ADC measurements. */
-  ROM_TimerControlTrigger(TIMER5_BASE, TIMER_B, 1);
+  ROM_TimerIntEnable(TIMER3_BASE, TIMER_TIMA_TIMEOUT);
+  ROM_IntEnable(INT_TIMER3A);
+  /* Let the one-shot timer trigger start of ADC measurements. */
+  ROM_TimerControlTrigger(TIMER3_BASE, TIMER_B, 1);
+  /*
+    Enable interrupts for the one-shot timer.
+    This interrupt is used to re-enable the timer to be triggered again from
+    timer 3A.
+  */
+  ROM_TimerIntEnable(TIMER3_BASE, TIMER_TIMB_TIMEOUT);
+  ROM_IntEnable(INT_TIMER3B);
 
   ROM_TimerEnable(TIMER4_BASE, TIMER_BOTH);
-  ROM_TimerEnable(TIMER5_BASE, TIMER_BOTH);
+  ROM_TimerEnable(TIMER5_BASE, TIMER_A);
+  ROM_TimerEnable(TIMER3_BASE, TIMER_BOTH);
 
   /*
     Synchronise the timers.
@@ -124,9 +148,9 @@ setup_timer_pwm(void)
   */
   ROM_SysCtlPeripheralEnable(SYSCTL_PERIPH_TIMER0);
   HWREG(TIMER0_BASE+TIMER_O_SYNC) |=
-    (uint32_t)(TIMER_4A_SYNC|TIMER_4B_SYNC|TIMER_5A_SYNC|TIMER_5B_SYNC);
+    (uint32_t)(TIMER_4A_SYNC|TIMER_4B_SYNC|TIMER_5A_SYNC|TIMER_3A_SYNC);
   HWREG(TIMER0_BASE+TIMER_O_SYNC) &=
-    ~(uint32_t)(TIMER_4A_SYNC|TIMER_4B_SYNC|TIMER_5A_SYNC|TIMER_5B_SYNC);
+    ~(uint32_t)(TIMER_4A_SYNC|TIMER_4B_SYNC|TIMER_5A_SYNC|TIMER_3A_SYNC);
 }
 
 
@@ -370,6 +394,27 @@ hw_pc_duty(uint32_t pwm_match_value)
 
 
 void
+IntHandlerTimer3A(void)
+{
+  /* Clear the interrupt. */
+  HWREG(TIMER3_BASE + TIMER_O_ICR) = TIMER_TIMA_TIMEOUT;
+
+  motor_update();
+}
+
+
+void
+IntHandlerTimer3B(void)
+{
+  /* Clear the interrupt. */
+  HWREG(TIMER3_BASE + TIMER_O_ICR) = TIMER_TIMB_TIMEOUT;
+
+  /* Re-enable the timer for another triggered one-shot run. */
+  HWREG(TIMER3_BASE + TIMER_O_CTL) |= TIMER_CTL_TBEN;
+}
+
+
+void
 IntHandlerTimer4A(void)
 {
   /* Clear the interrupt. */
@@ -390,16 +435,6 @@ IntHandlerTimer5A(void)
 {
   /* Clear the interrupt. */
   HWREG(TIMER5_BASE + TIMER_O_ICR) = TIMER_CAPA_EVENT;
-}
-
-
-void
-IntHandlerTimer5B(void)
-{
-  /* Clear the interrupt. */
-  HWREG(TIMER5_BASE + TIMER_O_ICR) = TIMER_TIMB_TIMEOUT;
-
-  motor_update();
 }
 
 
@@ -432,8 +467,17 @@ IntHandlerADC0Seq0(void)
   /* Clear the interrupt. */
   HWREG(ADC0_BASE + ADC_O_ISC) = 1 << ADC_SEQUENCER;
 
-  for (i = 0; i < 7; ++i)
+  for (i = 0; i < 8; ++i) {
+#if 0
+    if (HWREG(ADC0_BASE+ADC_O_SSFSTAT0) & ADC_SSFSTAT0_EMPTY) {
+      serial_output_str("Fifo empty ADC0\n");
+      serial_output_hexbyte(HWREG(ADC0_BASE+ADC_O_SSFSTAT0));
+      println_uint32(i);
+      for (;;);
+    }
+#endif
     adc_phase_samples[i] = HWREG(ADC0_BASE + ADC_SEQUENCER_FIFO);
+  }
 
   dbg_save_samples();
 }
@@ -447,8 +491,17 @@ IntHandlerADC1Seq0(void)
   /* Clear the interrupt. */
   HWREG(ADC1_BASE + ADC_O_ISC) = 1 << ADC_SEQUENCER;
 
-  for (i = 0; i < 7; ++i)
+  for (i = 0; i < 8; ++i) {
+#if 0
+    if (HWREG(ADC1_BASE+ADC_O_SSFSTAT0) & ADC_SSFSTAT0_EMPTY) {
+      serial_output_str("Fifo empty ADC0\n");
+      serial_output_hexbyte(HWREG(ADC1_BASE+ADC_O_SSFSTAT0));
+      println_uint32(i);
+      for (;;);
+    }
+#endif
     adc_neutral_samples[i] = HWREG(ADC1_BASE + ADC_SEQUENCER_FIFO);
+  }
 
   dbg_save_samples();
 }
@@ -610,14 +663,17 @@ motor_update()
   uint32_t delta, target;
 
   /*
-    Start ADC measurements of the phase and the neutral.
+    ADC measurements of the phase and the neutral are started by timer 3B
+    (triggered from timer 3A) at a controlled delay from the start of this
+    interrupt routine.
+
     The measurements will be collected by the ADC interrupts when done.
+
     The ADC interrupts are lower priority than the PWM timer interrupts, so we
     can safely read the values stored during the previous PWM cycle here,
     without risk that they will be overwritten midway by the new, ongoing
     measurements.
   */
-  // adc_start();   // Triggered from timer 5B now.
 
   /*
     When switching commutation step, set the new PWM period (=duty cycle)
@@ -698,7 +754,8 @@ int main()
   ROM_IntPrioritySet(INT_TIMER4A, 0 << 5);
   ROM_IntPrioritySet(INT_TIMER4B, 0 << 5);
   ROM_IntPrioritySet(INT_TIMER5A, 0 << 5);
-  ROM_IntPrioritySet(INT_TIMER5B, 0 << 5);
+  ROM_IntPrioritySet(INT_TIMER3A, 0 << 5);
+  ROM_IntPrioritySet(INT_TIMER3B, 2 << 5);
   ROM_IntPrioritySet(INT_ADC0SS0, 1 << 5);
   ROM_IntPrioritySet(INT_ADC1SS0, 1 << 5);
 
