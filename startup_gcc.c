@@ -40,6 +40,8 @@ extern void IntHandlerTimer4A(void);
 extern void IntHandlerTimer4B(void);
 extern void IntHandlerTimer5A(void);
 extern void IntHandlerTimer5B(void);
+extern void IntHandlerADC0Seq0(void);
+extern void IntHandlerADC1Seq0(void);
 
 //*****************************************************************************
 //
@@ -95,7 +97,7 @@ void (* const g_pfnVectors[])(void) =
     IntDefaultHandler,                      // PWM Generator 1
     IntDefaultHandler,                      // PWM Generator 2
     IntDefaultHandler,                      // Quadrature Encoder 0
-    IntDefaultHandler,                      // ADC Sequence 0
+    IntHandlerADC0Seq0,                     // ADC Sequence 0
     IntDefaultHandler,                      // ADC Sequence 1
     IntDefaultHandler,                      // ADC Sequence 2
     IntDefaultHandler,                      // ADC Sequence 3
@@ -129,7 +131,7 @@ void (* const g_pfnVectors[])(void) =
     IntDefaultHandler,                      // PWM Generator 3
     IntDefaultHandler,                      // uDMA Software Transfer
     IntDefaultHandler,                      // uDMA Error
-    IntDefaultHandler,                      // ADC1 Sequence 0
+    IntHandlerADC1Seq0,                     // ADC1 Sequence 0
     IntDefaultHandler,                      // ADC1 Sequence 1
     IntDefaultHandler,                      // ADC1 Sequence 2
     IntDefaultHandler,                      // ADC1 Sequence 3

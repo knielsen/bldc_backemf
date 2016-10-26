@@ -164,6 +164,8 @@ setup_adc(void)
     ROM_ADCSequenceStepConfigure(ADC0_BASE, ADC_SEQUENCER, i,
                                  ADC_CTL_CH10 |
                                  (i==7 ? (ADC_CTL_IE | ADC_CTL_END) : 0));
+  ROM_ADCIntEnable(ADC0_BASE, ADC_SEQUENCER);
+  ROM_IntEnable(INT_ADC0SS0);
   ROM_ADCSequenceEnable(ADC0_BASE, ADC_SEQUENCER);
 
   /* Setup ADC1 for sampling the neutral point. */
@@ -173,6 +175,8 @@ setup_adc(void)
     ROM_ADCSequenceStepConfigure(ADC1_BASE, ADC_SEQUENCER, i,
                                  ADC_CTL_CH4 |
                                  (i==7 ? ( ADC_CTL_IE | ADC_CTL_END) : 0));
+  ROM_ADCIntEnable(ADC1_BASE, ADC_SEQUENCER);
+  ROM_IntEnable(INT_ADC1SS0);
   ROM_ADCSequenceEnable(ADC1_BASE, ADC_SEQUENCER);
 }
 
@@ -230,6 +234,7 @@ dbg_add_sample(int16_t sample)
 }
 
 
+__attribute__ ((unused))
 static void
 dbg_add_samples(uint32_t count)
 {
@@ -241,6 +246,18 @@ dbg_add_samples(uint32_t count)
     --count;
     if (l_idx < DBG_NUM_SAMPLES)
       dbg_adc_samples[l_idx++] = sample;
+  }
+  dbg_adc_idx = l_idx;
+}
+
+
+static void
+dbg_add_samples_buf(uint16_t *phases, uint16_t *neutrals, uint32_t count)
+{
+  uint32_t l_idx = dbg_adc_idx;
+  while (count > 0 && l_idx < DBG_NUM_SAMPLES) {
+    dbg_adc_samples[l_idx++] = (int16_t)*phases++ - (int16_t)*neutrals++;
+    --count;
   }
   dbg_adc_idx = l_idx;
 }
@@ -380,10 +397,61 @@ IntHandlerTimer5A(void)
 void
 IntHandlerTimer5B(void)
 {
-  motor_update();
-
   /* Clear the interrupt. */
   HWREG(TIMER5_BASE + TIMER_O_ICR) = TIMER_CAPB_EVENT;
+
+  motor_update();
+}
+
+
+static uint16_t adc_phase_samples[8];
+static uint16_t adc_neutral_samples[8];
+static uint32_t adc_done_counter = 0;
+/* Flag set when we start dumping samples to dbg. */
+static uint32_t motor_adc_dbg = 0;
+
+static void
+dbg_save_samples(void)
+{
+  uint32_t l_done_count = adc_done_counter;
+  ++l_done_count;
+  if (l_done_count == 2) {
+    if (motor_adc_dbg)
+      dbg_add_samples_buf(adc_phase_samples, adc_neutral_samples, 8);
+    adc_done_counter = 0;
+  }
+  else
+    adc_done_counter = l_done_count;
+}
+
+
+void
+IntHandlerADC0Seq0(void)
+{
+  int i;
+
+  /* Clear the interrupt. */
+  HWREG(ADC0_BASE + ADC_O_ISC) = 1 << ADC_SEQUENCER;
+
+  for (i = 0; i < 7; ++i)
+    adc_phase_samples[i] = HWREG(ADC0_BASE + ADC_SEQUENCER_FIFO);
+
+  dbg_save_samples();
+}
+
+
+void
+IntHandlerADC1Seq0(void)
+{
+  int i;
+
+  /* Clear the interrupt. */
+  HWREG(ADC1_BASE + ADC_O_ISC) = 1 << ADC_SEQUENCER;
+
+  for (i = 0; i < 7; ++i)
+    adc_neutral_samples[i] = HWREG(ADC1_BASE + ADC_SEQUENCER_FIFO);
+
+  dbg_save_samples();
 }
 
 
@@ -529,8 +597,6 @@ static volatile uint32_t motor_speed_change_start = 0;
 static volatile uint32_t motor_speed_change_end = 0;
 static volatile float motor_speed_start = 0.0f;
 static volatile float motor_speed_end = 0.0f;
-/* Flag set when we start dumping samples to dbg. */
-static uint32_t motor_adc_dbg = 0;
 
 
 /*
@@ -544,14 +610,14 @@ motor_update()
   float l_motor_cur_speed;
   uint32_t delta, target;
 
-  if (motor_adc_dbg)
-    dbg_add_samples(8);
-  else {
-    uint32_t i;
-    i = 8;
-    while (i--)
-      (void)adc_read();
-  }
+  /*
+    Start ADC measurements of the phase and the neutral.
+    The measurements will be collected by the ADC interrupts when done.
+    The ADC interrupts are lower priority than the PWM timer interrupts, so we
+    can safely read the values stored during the previous PWM cycle here,
+    without risk that they will be overwritten midway by the new, ongoing
+    measurements.
+  */
   adc_start();
 
   /*
@@ -634,11 +700,10 @@ int main()
   ROM_IntPrioritySet(INT_TIMER4B, 0 << 5);
   ROM_IntPrioritySet(INT_TIMER5A, 0 << 5);
   ROM_IntPrioritySet(INT_TIMER5B, 0 << 5);
+  ROM_IntPrioritySet(INT_ADC0SS0, 1 << 5);
+  ROM_IntPrioritySet(INT_ADC1SS0, 1 << 5);
 
   setup_adc();
-  /* Let's get an initial set of ADC samples into the ADC fifo. */
-  adc_start();
-  ROM_SysCtlDelay(80*8);
   setup_timer_pwm();
   setup_systick();
 
