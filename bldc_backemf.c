@@ -48,17 +48,18 @@ setup_timer_pwm(void)
   ROM_SysCtlPeripheralEnable(SYSCTL_PERIPH_TIMER4);
   ROM_SysCtlPeripheralEnable(SYSCTL_PERIPH_TIMER5);
   ROM_SysCtlPeripheralEnable(SYSCTL_PERIPH_GPIOG);
+  ROM_SysCtlGPIOAHBEnable(SYSCTL_PERIPH_GPIOG);
   ROM_GPIOPinConfigure(GPIO_PG0_T4CCP0);
   ROM_GPIOPinConfigure(GPIO_PG1_T4CCP1);
   ROM_GPIOPinConfigure(GPIO_PG2_T5CCP0);
-  ROM_GPIOPinTypeTimer(GPIO_PORTG_BASE, GPIO_PIN_0|GPIO_PIN_1|GPIO_PIN_2);
-  //ROM_GPIOPadConfigSet(GPIO_PORTG_BASE, GPIO_PIN_0|GPIO_PIN_1|GPIO_PIN_2,
+  ROM_GPIOPinTypeTimer(GPIO_PORTG_AHB_BASE, GPIO_PIN_0|GPIO_PIN_1|GPIO_PIN_2);
+  //ROM_GPIOPadConfigSet(GPIO_PORTG_AHB_BASE, GPIO_PIN_0|GPIO_PIN_1|GPIO_PIN_2,
   //                     GPIO_STRENGTH_8MA, GPIO_PIN_TYPE_STD);
-  ROM_GPIOPinTypeGPIOOutput(GPIO_PORTG_BASE, GPIO_PIN_3|GPIO_PIN_4|GPIO_PIN_5);
+  ROM_GPIOPinTypeGPIOOutput(GPIO_PORTG_AHB_BASE, GPIO_PIN_3|GPIO_PIN_4|GPIO_PIN_5);
   /* Set EN pins low, for off. */
-  ROM_GPIOPinWrite(GPIO_PORTG_BASE, GPIO_PIN_3, 0);
-  ROM_GPIOPinWrite(GPIO_PORTG_BASE, GPIO_PIN_4, 0);
-  ROM_GPIOPinWrite(GPIO_PORTG_BASE, GPIO_PIN_5, 0);
+  ROM_GPIOPinWrite(GPIO_PORTG_AHB_BASE, GPIO_PIN_3, 0);
+  ROM_GPIOPinWrite(GPIO_PORTG_AHB_BASE, GPIO_PIN_4, 0);
+  ROM_GPIOPinWrite(GPIO_PORTG_AHB_BASE, GPIO_PIN_5, 0);
 
   /*
     We use TIMER4A, TIMER4B, TIMER5A to drive IN1, IN2, IN3 with PWM.
@@ -330,45 +331,60 @@ dbg_dump_samples(void)
 }
 
 
+__attribute__((unused))
+static inline uint32_t
+my_gpio_read(unsigned long gpio_base, uint32_t bits)
+{
+  return HWREG(gpio_base + GPIO_O_DATA + (bits << 2));
+}
+
+
+static inline void
+my_gpio_write(unsigned long gpio_base, uint32_t bits, uint32_t val)
+{
+  HWREG(gpio_base + GPIO_O_DATA + (bits << 2)) = val;
+}
+
+
 static inline void
 hw_pa_enable(void)
 {
-  ROM_GPIOPinWrite(GPIO_PORTG_BASE, GPIO_PIN_3, GPIO_PIN_3);
+  my_gpio_write(GPIO_PORTG_AHB_BASE, GPIO_PIN_3, GPIO_PIN_3);
 }
 
 
 static inline void
 hw_pb_enable(void)
 {
-  ROM_GPIOPinWrite(GPIO_PORTG_BASE, GPIO_PIN_4, GPIO_PIN_4);
+  my_gpio_write(GPIO_PORTG_AHB_BASE, GPIO_PIN_4, GPIO_PIN_4);
 }
 
 
 static inline void
 hw_pc_enable(void)
 {
-  ROM_GPIOPinWrite(GPIO_PORTG_BASE, GPIO_PIN_5, GPIO_PIN_5);
+  my_gpio_write(GPIO_PORTG_AHB_BASE, GPIO_PIN_5, GPIO_PIN_5);
 }
 
 
 static inline void
 hw_pa_disable(void)
 {
-  ROM_GPIOPinWrite(GPIO_PORTG_BASE, GPIO_PIN_3, 0);
+  my_gpio_write(GPIO_PORTG_AHB_BASE, GPIO_PIN_3, 0);
 }
 
 
 static inline void
 hw_pb_disable(void)
 {
-  ROM_GPIOPinWrite(GPIO_PORTG_BASE, GPIO_PIN_4, 0);
+  my_gpio_write(GPIO_PORTG_AHB_BASE, GPIO_PIN_4, 0);
 }
 
 
 static inline void
 hw_pc_disable(void)
 {
-  ROM_GPIOPinWrite(GPIO_PORTG_BASE, GPIO_PIN_5, 0);
+  my_gpio_write(GPIO_PORTG_AHB_BASE, GPIO_PIN_5, 0);
 }
 
 
