@@ -407,11 +407,41 @@ IntHandlerTimer3A(void)
 }
 
 
+static const float damper = 0.20f;
+/* ToDo: Ability to dynamically vary the voltage by changing duty cycle. */
+static const uint32_t current_pwm_match_value = (PWM_PERIOD-DEADTIME) -
+  (uint32_t)(1.0f * (/*damper*/0.20f*(float)(PWM_PERIOD-2*DEADTIME)));
+
 void
 IntHandlerTimer3B(void)
 {
+  uint32_t adc_delay;
+
   /* Clear the interrupt. */
   HWREG(TIMER3_BASE + TIMER_O_ICR) = TIMER_TIMB_TIMEOUT;
+
+  /*
+    Set the delay of start of next ADC sampling.
+    We want to sample near the end of the next duty cycle.
+    2 microseconds from the end of the duty cycle seems to work well,
+    as long as the duty cycle is > 20%. Presumably, there is a bit of noise
+    injected into the ADC circuit when the next commute step starts, and
+    with 2 microseconds head start and one microsecond needed for ADC
+    conversion, things are better?
+
+    Currently, we are taking 8 samples, mostly for debugging purposes.
+    So we start 3 ADC samples earlier, so that the fourth sample is
+    the one we want to use for detecting zero-crossing.
+  */
+  adc_delay = PWM_PERIOD
+    - 2*MCU_HZ/1000000                  // Two sample before end of duty cycle
+    - 3*MCU_HZ/1000000                  // Three more samples back, for debug
+    - current_pwm_match_value;          // ... relative to duty cycle end
+  if (adc_delay >= (uint32_t)0x80000000)
+    adc_delay = 5;                      // underflow
+  else if (adc_delay > PWM_PERIOD-10*MCU_HZ/1000000)
+    adc_delay = PWM_PERIOD-10*MCU_HZ/1000000;  // Not too late
+  HWREG(TIMER3_BASE + TIMER_O_TBILR) = adc_delay;
 
   /* Re-enable the timer for another triggered one-shot run. */
   HWREG(TIMER3_BASE + TIMER_O_CTL) |= TIMER_CTL_TBEN;
@@ -565,11 +595,6 @@ get_time(void)
   return HWREG(NVIC_ST_CURRENT);
 }
 
-
-static const float damper = 0.20f;
-/* ToDo: Ability to dynamically vary the voltage by changing duty cycle. */
-static const uint32_t current_pwm_match_value = (PWM_PERIOD-DEADTIME) -
-  (uint32_t)(1.0f * (/*damper*/0.20f*(float)(PWM_PERIOD-2*DEADTIME)));
 
 static void
 setup_commute(int32_t pa, int32_t pb, int32_t pc)
