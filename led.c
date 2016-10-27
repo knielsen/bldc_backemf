@@ -4,7 +4,6 @@
 #include "inc/hw_memmap.h"
 #include "inc/hw_sysctl.h"
 #include "inc/hw_types.h"
-#include "driverlib/gpio.h"
 #include "driverlib/rom.h"
 #include "driverlib/sysctl.h"
 
@@ -15,19 +14,20 @@ void
 config_led(void)
 {
   ROM_SysCtlPeripheralEnable(SYSCTL_PERIPH_GPIOA);
-  ROM_GPIOPinTypeGPIOOutput(GPIO_PORTA_BASE, GPIO_PIN_7);
+  ROM_SysCtlGPIOAHBEnable(SYSCTL_PERIPH_GPIOA);
+  ROM_GPIOPinTypeGPIOOutput(GPIO_PORTA_AHB_BASE, GPIO_PIN_7);
 }
 
 
 void
 led_on(void)
 {
-  ROM_GPIOPinWrite(GPIO_PORTA_BASE, GPIO_PIN_7, GPIO_PIN_7);
+  my_gpio_write(GPIO_PORTA_AHB_BASE, GPIO_PIN_7, GPIO_PIN_7);
 }
 
 
 void
 led_off(void)
 {
-  ROM_GPIOPinWrite(GPIO_PORTA_BASE, GPIO_PIN_7, 0);
+  my_gpio_write(GPIO_PORTA_AHB_BASE, GPIO_PIN_7, 0);
 }

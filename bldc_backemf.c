@@ -172,12 +172,15 @@ setup_adc(void)
   ROM_SysCtlPeripheralEnable(SYSCTL_PERIPH_ADC0);
   ROM_SysCtlPeripheralEnable(SYSCTL_PERIPH_ADC1);
   ROM_SysCtlPeripheralEnable(SYSCTL_PERIPH_GPIOB);
+  ROM_SysCtlGPIOAHBEnable(SYSCTL_PERIPH_GPIOB);
   ROM_SysCtlPeripheralEnable(SYSCTL_PERIPH_GPIOD);
+  ROM_SysCtlGPIOAHBEnable(SYSCTL_PERIPH_GPIOD);
   ROM_SysCtlPeripheralEnable(SYSCTL_PERIPH_GPIOE);
-  ROM_GPIOPinTypeADC(GPIO_PORTB_BASE, GPIO_PIN_4);
-  ROM_GPIOPinTypeADC(GPIO_PORTD_BASE, GPIO_PIN_3);
-  ROM_GPIOPinTypeADC(GPIO_PORTE_BASE, GPIO_PIN_2);
-  ROM_GPIOPinTypeADC(GPIO_PORTE_BASE, GPIO_PIN_3);
+  ROM_SysCtlGPIOAHBEnable(SYSCTL_PERIPH_GPIOE);
+  ROM_GPIOPinTypeADC(GPIO_PORTB_AHB_BASE, GPIO_PIN_4);
+  ROM_GPIOPinTypeADC(GPIO_PORTD_AHB_BASE, GPIO_PIN_3);
+  ROM_GPIOPinTypeADC(GPIO_PORTE_AHB_BASE, GPIO_PIN_2);
+  ROM_GPIOPinTypeADC(GPIO_PORTE_AHB_BASE, GPIO_PIN_3);
   /* Set 1 Msamples/second speed. */
   HWREG(ADC0_BASE + ADC_O_PC) = 0x7;
   HWREG(ADC1_BASE + ADC_O_PC) = 0x7;
@@ -328,21 +331,6 @@ dbg_dump_samples(void)
   }
 
   dbg_adc_idx = 0;
-}
-
-
-__attribute__((unused))
-static inline uint32_t
-my_gpio_read(unsigned long gpio_base, uint32_t bits)
-{
-  return HWREG(gpio_base + GPIO_O_DATA + (bits << 2));
-}
-
-
-static inline void
-my_gpio_write(unsigned long gpio_base, uint32_t bits, uint32_t val)
-{
-  HWREG(gpio_base + GPIO_O_DATA + (bits << 2)) = val;
 }
 
 
