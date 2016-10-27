@@ -189,7 +189,7 @@ setup_adc(void)
   /* Sample the phase 8 times. */
   for (i = 0; i < 8; ++i)
     ROM_ADCSequenceStepConfigure(ADC0_BASE, ADC_SEQUENCER, i,
-                                 ADC_CTL_CH10 |
+                                 ADC_CTL_CH1 |
                                  (i==7 ? (ADC_CTL_IE | ADC_CTL_END) : 0));
   ROM_ADCIntEnable(ADC0_BASE, ADC_SEQUENCER);
   ROM_IntEnable(INT_ADC0SS0);
@@ -442,6 +442,10 @@ IntHandlerTimer5A(void)
 }
 
 
+static uint32_t pa_enabled = 0;
+static uint32_t pb_enabled = 0;
+static uint32_t pc_enabled = 0;
+
 static uint16_t adc_phase_samples[8];
 static uint16_t adc_neutral_samples[8];
 static uint32_t adc_done_counter = 0;
@@ -482,6 +486,39 @@ IntHandlerADC0Seq0(void)
 #endif
     adc_phase_samples[i] = HWREG(ADC0_BASE + ADC_SEQUENCER_FIFO);
   }
+
+  /*
+    Configure which phase to measure next PWM cycle.
+    The timer interrupt that switches which phase is the floating one runs at
+    a higher priority than this one, and it triggers at the same time as the
+    ADC starts measuring. So we are guaranteed at this point that the values
+    will be updated (and not change while we access them).
+  */
+
+  /*
+    Disable the sequencer. The datasheet recommends, but does not require
+    disabling before reconfiguring. We shouldn't risk spurious triggering
+    here while reconfiguring, because the trigger will not happen until the
+    next PWM cycle (and if we slip into that, we are in any case in trouble,
+    using too much time to maintain real-time motor commutation). So for now,
+    let's try without sequencer disable/enable around reconfiguration.
+  */
+  //HWREG(ADC0_BASE + ADC_O_ACTSS &= ~(uint32_t)(1 << ADC_SEQUENCER);
+
+  /*
+    Reconfigure the sequence to sample the phase that will be floating next
+    PWM cycle.
+    Phases A, B, C are on ADC channels 1, 0, 10, respectively.
+  */
+  if (!pa_enabled)
+    HWREG(ADC0_BASE + ADC_O_SSMUX0) = 1 * (uint32_t)0x11111111;
+  else if (!pb_enabled)
+    HWREG(ADC0_BASE + ADC_O_SSMUX0) = 0 * (uint32_t)0x11111111;
+  else
+    HWREG(ADC0_BASE + ADC_O_SSMUX0) = 10 * (uint32_t)0x11111111;
+
+  /* Re-enable sequencer, optimised away for now. */
+  //HWREG(ADC0_BASE + ADC_O_ACTSS |= (uint32_t)(1 << ADC_SEQUENCER);
 
   dbg_save_samples();
 }
@@ -533,10 +570,6 @@ static const float damper = 0.20f;
 /* ToDo: Ability to dynamically vary the voltage by changing duty cycle. */
 static const uint32_t current_pwm_match_value = (PWM_PERIOD-DEADTIME) -
   (uint32_t)(1.0f * (/*damper*/0.20f*(float)(PWM_PERIOD-2*DEADTIME)));
-
-static uint32_t pa_enabled = 0;
-static uint32_t pb_enabled = 0;
-static uint32_t pc_enabled = 0;
 
 static void
 setup_commute(int32_t pa, int32_t pb, int32_t pc)
