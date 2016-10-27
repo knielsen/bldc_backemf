@@ -701,6 +701,8 @@ static volatile uint32_t motor_revolutions = 0;
 static volatile uint32_t motor_tick = 0;
 /* Tick counter at last commute step. */
 static volatile uint32_t motor_last_commute = 0;
+/* Target duration of this commute step, or 0 if not yet known. */
+static uint32_t motor_commute_target = 0;
 /* Current motor commute step (0..5). */
 static volatile uint32_t motor_commute_step = 0;
 /* Current speed of motor, in mechanical revolutions per second. */
@@ -713,6 +715,19 @@ static volatile float motor_speed_start = 0.0f;
 static volatile float motor_speed_end = 0.0f;
 
 
+/* Set the value of motor current speed, in electric RPS. */
+static void
+motor_set_current_speed(float speed)
+{
+  /* The commutation algorithm currently does not work with zero speed. */
+  if (speed < 0.01f)
+    speed = 0.01f;
+  motor_cur_speed = speed;
+  motor_commute_target =
+    (uint32_t)floorf(0.5f + (float)PWM_FREQ / (speed*(float)ELECTRIC2MECHANICAL));
+}
+
+
 /*
   Runs once at the start of every PWM period.
   Updates the commutation step when necessary.
@@ -721,8 +736,7 @@ static void
 motor_update()
 {
   uint32_t l_motor_tick;
-  float l_motor_cur_speed;
-  uint32_t delta, target;
+  uint32_t delta, l_target;
 
   /*
     ADC measurements of the phase and the neutral are started by timer 3B
@@ -747,13 +761,11 @@ motor_update()
   do_enable_disable();
 
   l_motor_tick = motor_tick;
-  l_motor_cur_speed = motor_cur_speed;
 
   /* Check if it is time for a new commute step. */
   delta = l_motor_tick - motor_last_commute;
-  target = (uint32_t)floorf(0.5f + (float)PWM_FREQ /
-                            (l_motor_cur_speed*(float)ELECTRIC2MECHANICAL));
-  if (delta >= target) {
+  l_target = motor_commute_target;
+  if (delta >= l_target) {
     uint32_t l_step = motor_commute_step + 1;
     uint32_t l_adjusting = motor_adjusting_speed;
 
@@ -780,7 +792,7 @@ motor_update()
       else if (frac_inc > 1.0f)
         frac_inc = 1.0f;
       new_speed = l_start + frac_inc*(l_end - l_start);
-      motor_cur_speed = new_speed;
+      motor_set_current_speed(new_speed);
       if (sofar >= range)
         motor_adjusting_speed = 0;
     }
@@ -828,11 +840,11 @@ int main()
   serial_output_str("Motor controller init done\r\n");
 
   /* Spin up the motor a bit. */
-  motor_cur_speed = ELECTRIC2MECHANICAL*0.05f;
+  motor_set_current_speed(ELECTRIC2MECHANICAL*0.05f);
   motor_speed_change_start = motor_tick;
   motor_speed_change_end = motor_speed_change_start + PWM_FREQ*8;
   motor_speed_start = motor_cur_speed;
-  motor_speed_end = ELECTRIC2MECHANICAL*5.0f;
+  motor_speed_end = ELECTRIC2MECHANICAL*3.0f;
   motor_adjusting_speed = 1;
 
   last_time = get_time();
