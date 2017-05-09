@@ -496,6 +496,17 @@ dbg_save_samples(void)
     adc_done_counter = l_done_count;
 }
 
+static int16_t
+adc_current_backemf(void)
+{
+  /*
+    The timing of the ADC is so that the fourth sample is taken 2 microseconds
+    before the end of the duty cycle, which seems to give good results. See
+    IntHandlerTimer3B().
+  */
+  return (int16_t)adc_phase_samples[3] - (int16_t)adc_neutral_samples[3];
+}
+
 
 void
 IntHandlerADC0Seq0(void)
@@ -701,11 +712,13 @@ static volatile uint32_t motor_revolutions = 0;
 static volatile uint32_t motor_tick = 0;
 /* Tick counter at last commute step. */
 static volatile uint32_t motor_last_commute = 0;
+/* Duration, in motor ticks, of last commute step. */
+static uint32_t motor_last_commute_duration = 0;
 /* Target duration of this commute step, or 0 if not yet known. */
 static uint32_t motor_commute_target = 0;
 /* Current motor commute step (0..5). */
 static volatile uint32_t motor_commute_step = 0;
-/* Current speed of motor, in mechanical revolutions per second. */
+/* Current speed of motor, in electric revolutions per second. */
 static volatile float motor_cur_speed = 0.0f;
 /* Speed control. */
 static volatile uint32_t motor_adjusting_speed = 0;
@@ -724,7 +737,15 @@ motor_set_current_speed(float speed)
     speed = 0.01f;
   motor_cur_speed = speed;
   motor_commute_target =
-    (uint32_t)floorf(0.5f + (float)PWM_FREQ / (speed*(float)ELECTRIC2MECHANICAL));
+    (uint32_t)floorf(0.5f + (float)PWM_FREQ / (speed*6.0f));
+}
+
+
+static void
+motor_set_commute_target(uint32_t target)
+{
+  motor_commute_target = target;
+  motor_cur_speed = ((float)PWM_FREQ/6.0f) / (float)target;
 }
 
 
@@ -737,6 +758,8 @@ motor_update()
 {
   uint32_t l_motor_tick;
   uint32_t delta, l_target;
+  uint32_t l_adjusting;
+  uint32_t l_step;
 
   /*
     ADC measurements of the phase and the neutral are started by timer 3B
@@ -765,10 +788,10 @@ motor_update()
   /* Check if it is time for a new commute step. */
   delta = l_motor_tick - motor_last_commute;
   l_target = motor_commute_target;
-  if (delta >= l_target) {
-    uint32_t l_step = motor_commute_step + 1;
-    uint32_t l_adjusting = motor_adjusting_speed;
-
+  l_adjusting = motor_adjusting_speed;
+  l_step = motor_commute_step;
+  if (l_target && delta >= l_target) {
+    ++l_step;
     if (l_step == 6) {
       l_step = 0;
       ++motor_revolutions;
@@ -776,8 +799,9 @@ motor_update()
     setup_commute_step(l_step);
     motor_commute_step = l_step;
     motor_last_commute = l_motor_tick;
+    motor_last_commute_duration = delta;
 
-    /* Adjust speed, if appropriate. */
+    /* Adjust speed, if appropriate, in open loop operation. */
     if (l_adjusting) {
       uint32_t l_speed_change_start = motor_speed_change_start;
       uint32_t l_speed_change_end = motor_speed_change_end;
@@ -793,16 +817,45 @@ motor_update()
         frac_inc = 1.0f;
       new_speed = l_start + frac_inc*(l_end - l_start);
       motor_set_current_speed(new_speed);
-      if (sofar >= range)
+      if (sofar >= range && l_step == 0)
         motor_adjusting_speed = 0;
+    } else {
+      /*
+        In closed loop operation, measure back-EMF zero-crossing to find when
+        to perform the next commutation step.
+      */
+      motor_commute_target = 0;
     }
 
     /*
       Start dumping samples for debug once we have reached target speed and
-      the commutation reaches the starting commute step.
+      enter closed-loop operation.
     */
-    if (!l_adjusting && l_step == 0)
+    if (!l_adjusting)
       motor_adc_dbg = 1;
+  }
+
+  /* Back-EMF zero-crossing detection in closed loop operation. */
+  if (!l_target && !l_adjusting && delta >= 8) {
+    int16_t backemf = adc_current_backemf();
+    /*
+      In even (0,2,4) commute steps, we are looking for downwards zero crossing.
+      In odd (1,3,5), for upwards.
+
+      ToDo: Probably need some filtering here.
+    */
+    if ((!(l_step & 1) && backemf < 0) || ((l_step & 1) && backemf > 0)) {
+      /*
+        Zero-crossing detected. Set next commute target to estimated 30
+        electrical degrees (1/2 of last commute period).
+      */
+      l_target = delta + motor_last_commute_duration/2;
+      if (l_target < 10)
+        l_target = 10;
+      else if (l_target > 2000)
+        l_target = 2000;
+      motor_set_commute_target(l_target);
+    }
   }
 
   motor_tick = l_motor_tick + 1;
@@ -842,7 +895,7 @@ int main()
   /* Spin up the motor a bit. */
   motor_set_current_speed(ELECTRIC2MECHANICAL*0.05f);
   motor_speed_change_start = motor_tick;
-  motor_speed_change_end = motor_speed_change_start + PWM_FREQ*8;
+  motor_speed_change_end = motor_speed_change_start + PWM_FREQ*3;
   motor_speed_start = motor_cur_speed;
   motor_speed_end = ELECTRIC2MECHANICAL*3.0f;
   motor_adjusting_speed = 1;
@@ -864,6 +917,9 @@ int main()
       cur_time = get_time();
     } while (((last_time - cur_time) & (time_period - 1)) < MCU_HZ/10);
     last_time = cur_time;
+
+    serial_output_str("Speed: ");
+    println_float(motor_cur_speed*(1.0f/(float)ELECTRIC2MECHANICAL), 2, 2);
 
     dbg_dump_samples();
   }
