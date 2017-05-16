@@ -21,9 +21,17 @@
 #include "led.h"
 
 
+/*
+  Switch 1 (?): PC4
+  switch 3 (start/stop motor): PA6
+*/
+
+
 /* To change this, must fix clock setup in the code. */
 #define MCU_HZ 80000000
 
+
+#define DAMPER_VALUE 0.20f
 
 /* Electric rotations per mechanical rotation. */
 #define ELECTRIC2MECHANICAL 6
@@ -39,6 +47,32 @@ static const float F_PI = 3.141592654f;
 
 
 static void motor_update(void);
+
+
+static void
+setup_controlpanel(void)
+{
+
+  /* Switch 1 & 3 on PC4 & PA6. */
+  ROM_SysCtlPeripheralEnable(SYSCTL_PERIPH_GPIOA);
+  ROM_SysCtlGPIOAHBEnable(SYSCTL_PERIPH_GPIOA);
+  ROM_SysCtlPeripheralEnable(SYSCTL_PERIPH_GPIOC);
+  ROM_SysCtlGPIOAHBEnable(SYSCTL_PERIPH_GPIOC);
+  ROM_GPIODirModeSet(GPIO_PORTA_AHB_BASE, GPIO_PIN_6, GPIO_DIR_MODE_IN);
+  ROM_GPIOPadConfigSet(GPIO_PORTA_AHB_BASE, GPIO_PIN_6,
+                       GPIO_STRENGTH_2MA, GPIO_PIN_TYPE_STD_WPU);
+  ROM_GPIODirModeSet(GPIO_PORTC_AHB_BASE, GPIO_PIN_4, GPIO_DIR_MODE_IN);
+  ROM_GPIOPadConfigSet(GPIO_PORTC_AHB_BASE, GPIO_PIN_4,
+                       GPIO_STRENGTH_2MA, GPIO_PIN_TYPE_STD_WPU);
+}
+
+
+static uint32_t
+check_start_stop_switch(void)
+{
+  long start_stop_switch = my_gpio_read(GPIO_PORTA_AHB_BASE, GPIO_PIN_6);
+  return (start_stop_switch == 0);
+}
 
 
 static void
@@ -314,8 +348,8 @@ dbg_dump_samples(void)
 {
   uint32_t l_idx, i;
 
-  while ((l_idx = dbg_adc_idx) < DBG_NUM_SAMPLES)
-    ;
+  if ((l_idx = dbg_adc_idx) < DBG_NUM_SAMPLES)
+    return;
 
   serial_output_str
     ("-----------------------------------------------------------------------\r\n");
@@ -407,10 +441,10 @@ IntHandlerTimer3A(void)
 }
 
 
-static const float damper = 0.20f;
+static float motor_damper = 0;
 /* ToDo: Ability to dynamically vary the voltage by changing duty cycle. */
-static const uint32_t current_pwm_match_value = (PWM_PERIOD-DEADTIME) -
-  (uint32_t)(1.0f * (/*damper*/0.20f*(float)(PWM_PERIOD-2*DEADTIME)));
+static uint32_t current_pwm_match_value = (PWM_PERIOD-DEADTIME) -
+  (uint32_t)(1.0f * (0.0f*(float)(PWM_PERIOD-2*DEADTIME)));
 
 void
 IntHandlerTimer3B(void)
@@ -721,12 +755,18 @@ static volatile uint32_t motor_commute_step = 0;
 /* Current speed of motor, in electric revolutions per second. */
 static volatile float motor_cur_speed = 0.0f;
 /* Speed control. */
-static volatile uint32_t motor_adjusting_speed = 0;
+static volatile uint32_t motor_spinning_up = 0;
 static volatile uint32_t motor_speed_change_start = 0;
 static volatile uint32_t motor_speed_change_end = 0;
 static volatile float motor_speed_start = 0.0f;
 static volatile float motor_speed_end = 0.0f;
 
+static volatile uint32_t motor_idle = 1;
+static volatile uint32_t motor_spinning_down = 0;
+static volatile uint32_t motor_spin_down_start = 0;
+static volatile uint32_t motor_spin_down_end = 0;
+static volatile uint32_t motor_spin_down_idle = 0;
+static volatile float motor_spin_down_initial_damper = 0;
 
 /* Set the value of motor current speed, in electric RPS. */
 static void
@@ -749,6 +789,97 @@ motor_set_commute_target(uint32_t target)
 }
 
 
+static void
+motor_set_damper(float damper)
+{
+  if (damper < 0.0f)
+    damper = 0.0f;
+  else if (damper > 1.0f)
+    damper = 1.0f;
+  motor_damper = damper;
+  current_pwm_match_value =
+    (PWM_PERIOD-DEADTIME) - (uint32_t)(damper*(float)(PWM_PERIOD-2*DEADTIME));
+}
+
+
+static void
+motor_adjust_damper(uint32_t l_motor_tick, uint32_t l_step)
+{
+  if (motor_spinning_down) {
+    float new_damper;
+    uint32_t l_spindown_start = motor_spin_down_start;
+    uint32_t l_spindown_end = motor_spin_down_end;
+    uint32_t range = l_spindown_end - l_spindown_start;
+    uint32_t sofar = l_motor_tick - l_spindown_start;
+    float frac = 1.0f - (float)sofar/(float)range;
+
+    if (frac < 0.0f)
+      frac = 0.0f;
+    else if (frac > 1.0f)
+      frac = 1.0f;
+    new_damper = frac * motor_spin_down_initial_damper;
+    motor_set_damper(new_damper);
+    setup_commute_step(l_step);
+    if (sofar >= (motor_spin_down_idle - l_spindown_start)) {
+      motor_spinning_down = 0;
+      motor_idle = 1;
+      motor_adc_dbg = 0;
+    }
+  }
+}
+
+
+static void
+open_loop_adjust_speed(uint32_t l_motor_tick, uint32_t l_step)
+{
+  /* Adjust speed as appropriate in open loop operation. */
+  uint32_t l_speed_change_start = motor_speed_change_start;
+  uint32_t l_speed_change_end = motor_speed_change_end;
+  uint32_t range = l_speed_change_end - l_speed_change_start;
+  uint32_t sofar = l_motor_tick - l_speed_change_start;
+  float frac_inc = (float)sofar/(float)range;
+  float new_speed;
+  float l_start = motor_speed_start;
+  float l_end = motor_speed_end;
+  if (frac_inc < 0.0f)
+    frac_inc = 0.0f;
+  else if (frac_inc > 1.0f)
+    frac_inc = 1.0f;
+  new_speed = l_start + frac_inc*(l_end - l_start);
+  motor_set_current_speed(new_speed);
+  /* Once target is reached, go to closed-loop operation. */
+  if (sofar >= range && l_step == 0)
+    motor_spinning_up = 0;
+}
+
+
+static void
+closed_loop_detect_zero_crossing(uint32_t delta, uint32_t l_step)
+{
+  int16_t backemf = adc_current_backemf();
+  uint32_t l_target;
+
+  /*
+    In even (0,2,4) commute steps, we are looking for downwards zero crossing.
+    In odd (1,3,5), for upwards.
+
+    ToDo: Probably need some filtering here.
+  */
+  if ((!(l_step & 1) && backemf < 0) || ((l_step & 1) && backemf > 0)) {
+    /*
+      Zero-crossing detected. Set next commute target to estimated 30
+      electrical degrees (1/2 of last commute period).
+    */
+    l_target = delta + motor_last_commute_duration/2;
+    if (l_target < 10)
+      l_target = 10;
+    else if (l_target > 2000)
+      l_target = 2000;
+    motor_set_commute_target(l_target);
+  }
+}
+
+
 /*
   Runs once at the start of every PWM period.
   Updates the commutation step when necessary.
@@ -758,7 +889,7 @@ motor_update()
 {
   uint32_t l_motor_tick;
   uint32_t delta, l_target;
-  uint32_t l_adjusting;
+  uint32_t l_spinning_up;
   uint32_t l_step;
 
   /*
@@ -785,80 +916,92 @@ motor_update()
 
   l_motor_tick = motor_tick;
 
-  /* Check if it is time for a new commute step. */
-  delta = l_motor_tick - motor_last_commute;
-  l_target = motor_commute_target;
-  l_adjusting = motor_adjusting_speed;
-  l_step = motor_commute_step;
-  if (l_target && delta >= l_target) {
-    ++l_step;
-    if (l_step == 6) {
-      l_step = 0;
-      ++motor_revolutions;
-    }
-    setup_commute_step(l_step);
-    motor_commute_step = l_step;
-    motor_last_commute = l_motor_tick;
-    motor_last_commute_duration = delta;
+  if (!motor_idle) {
+    l_spinning_up = motor_spinning_up;
+    l_step = motor_commute_step;
 
-    /* Adjust speed, if appropriate, in open loop operation. */
-    if (l_adjusting) {
-      uint32_t l_speed_change_start = motor_speed_change_start;
-      uint32_t l_speed_change_end = motor_speed_change_end;
-      uint32_t range = l_speed_change_end - l_speed_change_start;
-      uint32_t sofar = l_motor_tick - l_speed_change_start;
-      float frac_inc = (float)sofar/(float)range;
-      float new_speed;
-      float l_start = motor_speed_start;
-      float l_end = motor_speed_end;
-      if (frac_inc < 0.0f)
-        frac_inc = 0.0f;
-      else if (frac_inc > 1.0f)
-        frac_inc = 1.0f;
-      new_speed = l_start + frac_inc*(l_end - l_start);
-      motor_set_current_speed(new_speed);
-      if (sofar >= range && l_step == 0)
-        motor_adjusting_speed = 0;
-    } else {
-      /*
-        In closed loop operation, measure back-EMF zero-crossing to find when
-        to perform the next commutation step.
-      */
-      motor_commute_target = 0;
+    /* Check if it is time for a new commute step. */
+    delta = l_motor_tick - motor_last_commute;
+    l_target = motor_commute_target;
+    if (l_target && delta >= l_target) {
+      ++l_step;
+      if (l_step == 6) {
+        l_step = 0;
+        ++motor_revolutions;
+      }
+      setup_commute_step(l_step);
+      motor_commute_step = l_step;
+      motor_last_commute = l_motor_tick;
+      motor_last_commute_duration = delta;
+
+      if (l_spinning_up) {
+        /* In open-loop operation we adjust speed at every commute step. */
+        open_loop_adjust_speed(l_motor_tick, l_step);
+      } else {
+        /*
+          In closed loop operation, measure back-EMF zero-crossing to find when
+          to perform the next commutation step.
+        */
+        motor_commute_target = 0;
+
+        /*
+          Start dumping samples for debug once we have reached target speed and
+          enter closed-loop operation.
+        */
+        motor_adc_dbg = 1;
+      }
     }
 
-    /*
-      Start dumping samples for debug once we have reached target speed and
-      enter closed-loop operation.
-    */
-    if (!l_adjusting)
-      motor_adc_dbg = 1;
-  }
+    /* Back-EMF zero-crossing detection in closed loop operation. */
+    if (!l_spinning_up && !l_target && delta >= 8) {
+      closed_loop_detect_zero_crossing(delta, l_step);
 
-  /* Back-EMF zero-crossing detection in closed loop operation. */
-  if (!l_target && !l_adjusting && delta >= 8) {
-    int16_t backemf = adc_current_backemf();
-    /*
-      In even (0,2,4) commute steps, we are looking for downwards zero crossing.
-      In odd (1,3,5), for upwards.
-
-      ToDo: Probably need some filtering here.
-    */
-    if ((!(l_step & 1) && backemf < 0) || ((l_step & 1) && backemf > 0)) {
       /*
-        Zero-crossing detected. Set next commute target to estimated 30
-        electrical degrees (1/2 of last commute period).
+        ToDo: Should we be able to spin down also in the open-loop state?
+        But then we need to make sure that the two states do not conflict in
+        strange ways.
       */
-      l_target = delta + motor_last_commute_duration/2;
-      if (l_target < 10)
-        l_target = 10;
-      else if (l_target > 2000)
-        l_target = 2000;
-      motor_set_commute_target(l_target);
+      motor_adjust_damper(l_motor_tick, l_step);
     }
   }
 
   motor_tick = l_motor_tick + 1;
+}
+
+
+static void
+start_open_loop(float start_mech_rps, float end_mech_rps, float duration_sec)
+{
+  if (!motor_idle)
+    return;
+  if (motor_spinning_up || motor_spinning_down)
+    return;
+  motor_set_damper(DAMPER_VALUE);
+  motor_set_current_speed(ELECTRIC2MECHANICAL*start_mech_rps);
+  motor_speed_change_start = motor_tick;
+  motor_speed_change_end =
+    motor_speed_change_start + (uint32_t)(PWM_FREQ*duration_sec + 0.5f);
+  motor_speed_start = motor_cur_speed;
+  motor_speed_end = ELECTRIC2MECHANICAL*end_mech_rps;
+  motor_spinning_up = 1;
+  motor_idle = 0;
+}
+
+
+static void
+start_spin_down(void)
+{
+  if (motor_spinning_down || motor_idle || motor_spinning_up)
+    return;
+  motor_spin_down_start = motor_tick;
+  motor_spin_down_initial_damper = motor_damper;
+  /*
+    Spin down time of two seconds. After that, wait another 10 seconds for
+    the motor to stop on its own - currently, no active breaking.
+  */
+  motor_spin_down_end = motor_tick + PWM_FREQ*2;
+  motor_spin_down_idle = motor_spin_down_end + PWM_FREQ*10;
+  motor_spinning_down = 1;
 }
 
 
@@ -886,19 +1029,14 @@ int main()
   ROM_IntPrioritySet(INT_ADC0SS0, 1 << 5);
   ROM_IntPrioritySet(INT_ADC1SS0, 1 << 5);
 
+  setup_controlpanel();
   setup_adc();
+  motor_idle = 1;
+  motor_set_damper(0.0f);
   setup_timer_pwm();
   setup_systick();
 
   serial_output_str("Motor controller init done\r\n");
-
-  /* Spin up the motor a bit. */
-  motor_set_current_speed(ELECTRIC2MECHANICAL*0.05f);
-  motor_speed_change_start = motor_tick;
-  motor_speed_change_end = motor_speed_change_start + PWM_FREQ*3;
-  motor_speed_start = motor_cur_speed;
-  motor_speed_end = ELECTRIC2MECHANICAL*3.0f;
-  motor_adjusting_speed = 1;
 
   last_time = get_time();
   led_state = 0;
@@ -920,6 +1058,13 @@ int main()
 
     serial_output_str("Speed: ");
     println_float(motor_cur_speed*(1.0f/(float)ELECTRIC2MECHANICAL), 2, 2);
+    if (check_start_stop_switch()) {
+      if (motor_idle)
+        /* Spin up the motor a bit. */
+        start_open_loop(0.05f, 3.0f, 3.0f);
+    } else {
+      start_spin_down();
+    }
 
     dbg_dump_samples();
   }
