@@ -933,6 +933,7 @@ motor_update()
       motor_commute_step = l_step;
       motor_last_commute = l_motor_tick;
       motor_last_commute_duration = delta;
+      delta = 0;
 
       if (l_spinning_up) {
         /* In open-loop operation we adjust speed at every commute step. */
