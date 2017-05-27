@@ -49,8 +49,11 @@
 static const float F_PI = 3.141592654f;
 
 
-static float neutral_factor;
-static float phase_factor[3];
+/*
+  Measured conversion factors from measured ADC level to actual voltage.
+  Index 0..2 are for phases A, B, and C. Index 3 is for the neutral.
+*/
+static float phase_factor[4];
 
 
 static void motor_update(void);
@@ -309,78 +312,29 @@ adc_ready(void)
 }
 
 
-static inline int16_t
-adc_read(void)
-{
-  unsigned long phase, neutral;
-  // ROM_ADCSequenceDataGet(ADC0_BASE, ADC_SEQUENCER, &phase);
-  phase = HWREG(ADC0_BASE + ADC_SEQUENCER_FIFO);
-  // ROM_ADCSequenceDataGet(ADC1_BASE, ADC_SEQUENCER, &neutral);
-  neutral = HWREG(ADC1_BASE + ADC_SEQUENCER_FIFO);
-  return (int16_t)phase - (int16_t)neutral;
-}
-
-
+/*
+  Buffer to save ADC measurements, for later dumping over serial for debug.
+  We measure a phase and a neutral, and save them in the buffer.
+  ADC measurements are unsigned 12 bit 0..4095. This leaves free to use the
+  upper bits for flags. We use the upper two bits to store which phase
+  (0..2) or neutral (3) was measured.
+*/
 #define DBG_NUM_SAMPLES 12000
-static volatile int16_t dbg_adc_samples[DBG_NUM_SAMPLES];
+static volatile uint16_t dbg_adc_samples[DBG_NUM_SAMPLES];
 static volatile uint32_t dbg_adc_idx = 0;
 
 static void
-dbg_add_sample(int16_t sample)
+dbg_add_samples_buf(uint16_t *phases, uint16_t *neutrals, uint32_t count,
+                    uint32_t which_phase)
 {
   uint32_t l_idx = dbg_adc_idx;
-  if (l_idx < DBG_NUM_SAMPLES) {
-    dbg_adc_samples[l_idx++] = sample;
-    dbg_adc_idx = l_idx;
-  }
-}
-
-
-__attribute__ ((unused))
-static void
-dbg_add_samples(uint32_t count)
-{
-  uint32_t l_idx = dbg_adc_idx;
-  while (count > 0) {
-    int16_t sample;
-
-    sample = adc_read();
-    --count;
-    if (l_idx < DBG_NUM_SAMPLES)
-      dbg_adc_samples[l_idx++] = sample;
-  }
-  dbg_adc_idx = l_idx;
-}
-
-
-static void
-dbg_add_samples_buf(uint16_t *phases, uint16_t *neutrals, uint32_t count)
-{
-  uint32_t l_idx = dbg_adc_idx;
+  which_phase = (which_phase & 3) << 14;
   while (count > 0 && l_idx < DBG_NUM_SAMPLES) {
-    dbg_adc_samples[l_idx++] = (int16_t)*phases++ - (int16_t)*neutrals++;
+    dbg_adc_samples[l_idx++] = (*phases++ & 0xfff) | which_phase;
+    dbg_adc_samples[l_idx++] = (*neutrals++ & 0xfff) | ((uint16_t)3 << 14);
     --count;
   }
   dbg_adc_idx = l_idx;
-}
-
-
-__attribute__ ((unused))
-static void
-dbg_do_sample(void)
-{
-  static uint32_t dbg_called_before = 0;
-
-  if (dbg_called_before) {
-    if (adc_ready())
-      dbg_add_sample(adc_read());
-    else
-      for (;;) ;
-  }
-  else
-    dbg_called_before = 1;
-
-  adc_start();
 }
 
 
@@ -394,14 +348,14 @@ dbg_dump_samples(void)
 
   serial_output_str
     ("-----------------------------------------------------------------------\r\n");
-  for (i = 0; i < l_idx; ++i) {
-    int32_t diff = dbg_adc_samples[i];
-    /*
-      Resistor ladder with 10k and 2.2k ohm.
-      V = (10k+2.2k)/2.2k * V_measured
-      V_measured = adc_val/4095*3.3V
-    */
-    float voltage = ((10.0f+2.2f)/2.2f*3.3f/4095.0f)*(float)diff;
+  for (i = 0; i < l_idx; i += 2) {
+    uint32_t phase_n_flag = dbg_adc_samples[i];
+    uint32_t neutral_n_flag = dbg_adc_samples[i+1];
+    uint32_t phase = phase_n_flag & 0xfff;
+    uint32_t neutral = neutral_n_flag & 0xfff;
+    float phase_voltage = phase_factor[phase_n_flag >> 14] * (float)phase;
+    float neutral_voltage = phase_factor[neutral_n_flag >> 14] * (float)neutral;
+    float voltage = phase_voltage - neutral_voltage;
     println_float(voltage, 2, 5);
   }
 
@@ -598,6 +552,12 @@ static uint16_t adc_neutral_samples[8];
 static uint32_t adc_done_counter = 0;
 /* Flag set when we start dumping samples to dbg. */
 static uint32_t motor_adc_dbg = 0;
+/* Number of ticks (PWM periods). */
+static volatile uint32_t motor_tick = 0;
+/* Which phase is currently measured (0..2). */
+static uint32_t which_adc_phase;
+/* Which phase will be measured in next ADC measurement. */
+static uint32_t next_adc_phase;
 
 static void
 dbg_save_samples(void)
@@ -606,7 +566,7 @@ dbg_save_samples(void)
   ++l_done_count;
   if (l_done_count == 2) {
     if (motor_adc_dbg)
-      dbg_add_samples_buf(adc_phase_samples, adc_neutral_samples, 8);
+      dbg_add_samples_buf(adc_phase_samples, adc_neutral_samples, 8, which_adc_phase);
     adc_done_counter = 0;
   }
   else
@@ -629,6 +589,7 @@ void
 IntHandlerADC0Seq0(void)
 {
   int i;
+  uint32_t l_next;
 
   /* Clear the interrupt. */
   HWREG(ADC0_BASE + ADC_O_ISC) = 1 << ADC_SEQUENCER;
@@ -668,17 +629,23 @@ IntHandlerADC0Seq0(void)
     PWM cycle.
     Phases A, B, C are on ADC channels 1, 0, 10, respectively.
   */
-  if (!pa_enabled)
+  if (!pa_enabled) {
+    l_next = 0;
     HWREG(ADC0_BASE + ADC_O_SSMUX0) = 1 * (uint32_t)0x11111111;
-  else if (!pb_enabled)
+  } else if (!pb_enabled) {
+    l_next = 1;
     HWREG(ADC0_BASE + ADC_O_SSMUX0) = 0 * (uint32_t)0x11111111;
-  else
+  } else {
+    l_next = 2;
     HWREG(ADC0_BASE + ADC_O_SSMUX0) = 10 * (uint32_t)0x11111111;
+  }
 
   /* Re-enable sequencer, optimised away for now. */
   //HWREG(ADC0_BASE + ADC_O_ACTSS |= (uint32_t)(1 << ADC_SEQUENCER);
 
+  which_adc_phase = next_adc_phase;
   dbg_save_samples();
+  next_adc_phase = l_next;
 }
 
 
@@ -825,8 +792,6 @@ do_enable_disable(void)
 
 /* Number of mechanical revolutions made by motor. */
 static volatile uint32_t motor_revolutions = 0;
-/* Number of ticks (PWM periods). */
-static volatile uint32_t motor_tick = 0;
 /* Tick counter at last commute step. */
 static volatile uint32_t motor_last_commute = 0;
 /* Duration, in motor ticks, of last commute step. */
@@ -1006,6 +971,7 @@ measure_voltage_divider_bias(void)
 #endif
       /* Read phase and neutral. */
       HWREG(ADC0_BASE + ADC_O_SSMUX0) = chan * (uint32_t)0x11111111;
+      next_adc_phase = j;
       /* Run 2*REPEATS measurements, only using the later half ("warm-up"). */
       for (l = 0; l < REPEATS*2; ++l) {
         /*
@@ -1061,7 +1027,7 @@ measure_voltage_divider_bias(void)
   /* Find the median. */
   qsort(val_neutral, 3*3*8*REPEATS, sizeof(uint16_t), cmp_ushort);
   med_neutral = val_neutral[3*3*8*REPEATS/2];
-  neutral_factor = SUPPLY_VOLTAGE/(float)med_neutral;
+  phase_factor[3] = SUPPLY_VOLTAGE/(float)med_neutral;
   serial_output_str("Phase bias:");
   for (j = 0; j < 3; ++j) {
     uint16_t med_phase;
@@ -1069,7 +1035,7 @@ measure_voltage_divider_bias(void)
     med_phase = val_phase[j][3*8*REPEATS/2];
     phase_factor[j] = SUPPLY_VOLTAGE/(float)med_phase;
     serial_output_str(" ");
-    print_float(neutral_factor*(float)med_phase - neutral_factor*(float)med_neutral,
+    print_float(phase_factor[3]*(float)med_phase - phase_factor[3]*(float)med_neutral,
                 2, 3);
   }
   serial_output_str("\r\n");
