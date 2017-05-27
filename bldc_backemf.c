@@ -573,7 +573,7 @@ dbg_save_samples(void)
     adc_done_counter = l_done_count;
 }
 
-static int16_t
+static float
 adc_current_backemf(void)
 {
   /*
@@ -581,7 +581,11 @@ adc_current_backemf(void)
     before the end of the duty cycle, which seems to give good results. See
     IntHandlerTimer3B().
   */
-  return (int16_t)adc_phase_samples[3] - (int16_t)adc_neutral_samples[3];
+  uint32_t phase_sample = adc_phase_samples[3];
+  uint32_t neutral_sample = adc_neutral_samples[3];
+  float phase_voltage = phase_factor[which_adc_phase]*(float)phase_sample;
+  float neutral_voltage = phase_factor[3]*(float)neutral_sample;
+  return phase_voltage - neutral_voltage;
 }
 
 
@@ -1070,7 +1074,7 @@ open_loop_adjust_speed(uint32_t l_motor_tick, uint32_t l_step)
 static void
 closed_loop_detect_zero_crossing(uint32_t delta, uint32_t l_step)
 {
-  int16_t backemf = adc_current_backemf();
+  float backemf = adc_current_backemf();
   uint32_t l_target;
 
   /*
@@ -1079,12 +1083,12 @@ closed_loop_detect_zero_crossing(uint32_t delta, uint32_t l_step)
 
     ToDo: Probably need some filtering here.
   */
-  if ((!(l_step & 1) && backemf < 0) || ((l_step & 1) && backemf > 0)) {
+  if ((!(l_step & 1) && backemf < 0.0f) || ((l_step & 1) && backemf > 0.0f)) {
     /*
       Zero-crossing detected. Set next commute target to estimated 30
       electrical degrees (1/2 of last commute period).
     */
-    l_target = delta + motor_last_commute_duration/2;
+    l_target = delta + motor_last_commute_duration/2 - 2;
     if (l_target < 10)
       l_target = 10;
     else if (l_target > 2000)
