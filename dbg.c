@@ -63,6 +63,30 @@ println_uint32(uint32_t val)
 
 
 void
+print_uint32(uint32_t val)
+{
+  char buf[11];
+  char *p = buf;
+  uint32_t l, d;
+
+  l = 1000000000UL;
+  while (l > val && l > 1)
+    l /= 10;
+
+  do
+  {
+    d = val / l;
+    *p++ = '0' + d;
+    val -= d*l;
+    l /= 10;
+  } while (l > 0);
+
+  *p = '\0';
+  serial_output_str(buf);
+}
+
+
+void
 float_to_str(char *buf, float f, uint32_t dig_before, uint32_t dig_after)
 {
   float a;
@@ -129,6 +153,20 @@ println_float(float f, uint32_t dig_before, uint32_t dig_after)
     ++p;
   *p++ = '\r';
   *p++ = '\n';
+  *p = '\0';
+  serial_output_str(buf);
+}
+
+
+void
+print_float(float f, uint32_t dig_before, uint32_t dig_after)
+{
+  char buf[19];
+  char *p = buf;
+
+  float_to_str(p, f, dig_before, dig_after);
+  while (*p)
+    ++p;
   *p = '\0';
   serial_output_str(buf);
 }

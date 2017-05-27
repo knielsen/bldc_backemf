@@ -36,6 +36,8 @@
 /* Electric rotations per mechanical rotation. */
 #define ELECTRIC2MECHANICAL 6
 
+#define SUPPLY_VOLTAGE 12.04f
+
 #define PWM_FREQ 25000
 #define PWM_PERIOD (MCU_HZ/PWM_FREQ)
 
@@ -44,6 +46,10 @@
 
 
 static const float F_PI = 3.141592654f;
+
+
+static float neutral_factor;
+static float phase_factor[3];
 
 
 static void motor_update(void);
@@ -72,6 +78,30 @@ check_start_stop_switch(void)
 {
   long start_stop_switch = my_gpio_read(GPIO_PORTA_AHB_BASE, GPIO_PIN_6);
   return (start_stop_switch == 0);
+}
+
+
+/*
+  Set up initial config of GPIOs connected to L6234 motor controller.
+  This allows to do initial "manual" control.
+  Afterwards, we will reconfigure the GPIOs to be controlled from timer PWM.
+*/
+static void
+setup_manual_l6234(void)
+{
+  ROM_SysCtlPeripheralEnable(SYSCTL_PERIPH_GPIOG);
+  ROM_SysCtlGPIOAHBEnable(SYSCTL_PERIPH_GPIOG);
+  ROM_GPIOPinTypeGPIOOutput(GPIO_PORTG_AHB_BASE,
+                            GPIO_PIN_0|GPIO_PIN_1|GPIO_PIN_2|
+                            GPIO_PIN_3|GPIO_PIN_4|GPIO_PIN_5);
+  /* Set EN pins low, for off. */
+  ROM_GPIOPinWrite(GPIO_PORTG_AHB_BASE, GPIO_PIN_3, 0);
+  ROM_GPIOPinWrite(GPIO_PORTG_AHB_BASE, GPIO_PIN_4, 0);
+  ROM_GPIOPinWrite(GPIO_PORTG_AHB_BASE, GPIO_PIN_5, 0);
+  /* Set IN pins low, for low-side (connect-to-Gnd). */
+  ROM_GPIOPinWrite(GPIO_PORTG_AHB_BASE, GPIO_PIN_0, 0);
+  ROM_GPIOPinWrite(GPIO_PORTG_AHB_BASE, GPIO_PIN_1, 0);
+  ROM_GPIOPinWrite(GPIO_PORTG_AHB_BASE, GPIO_PIN_2, 0);
 }
 
 
@@ -199,7 +229,7 @@ setup_timer_pwm(void)
     PD3   neutral   AIN4   (sin3)
 */
 static void
-setup_adc(void)
+setup_adc_basic(void)
 {
   uint32_t i;
 
@@ -219,39 +249,49 @@ setup_adc(void)
   HWREG(ADC0_BASE + ADC_O_PC) = 0x7;
   HWREG(ADC1_BASE + ADC_O_PC) = 0x7;
 
-  ROM_ADCSequenceConfigure(ADC0_BASE, ADC_SEQUENCER, ADC_TRIGGER_TIMER, 0);
+  ROM_ADCSequenceConfigure(ADC0_BASE, ADC_SEQUENCER, ADC_TRIGGER_PROCESSOR, 0);
   /* Sample the phase 8 times. */
   for (i = 0; i < 8; ++i)
     ROM_ADCSequenceStepConfigure(ADC0_BASE, ADC_SEQUENCER, i,
                                  ADC_CTL_CH1 |
                                  (i==7 ? (ADC_CTL_IE | ADC_CTL_END) : 0));
-  ROM_ADCIntEnable(ADC0_BASE, ADC_SEQUENCER);
-  ROM_IntEnable(INT_ADC0SS0);
   ROM_ADCSequenceEnable(ADC0_BASE, ADC_SEQUENCER);
 
   /* Setup ADC1 for sampling the neutral point. */
-  ROM_ADCSequenceConfigure(ADC1_BASE, ADC_SEQUENCER, ADC_TRIGGER_TIMER, 0);
+  ROM_ADCSequenceConfigure(ADC1_BASE, ADC_SEQUENCER, ADC_TRIGGER_PROCESSOR, 0);
   /* Sample neutral phase 8 times. */
   for (i = 0; i < 8; ++i)
     ROM_ADCSequenceStepConfigure(ADC1_BASE, ADC_SEQUENCER, i,
                                  ADC_CTL_CH4 |
                                  (i==7 ? ( ADC_CTL_IE | ADC_CTL_END) : 0));
-  ROM_ADCIntEnable(ADC1_BASE, ADC_SEQUENCER);
-  ROM_IntEnable(INT_ADC1SS0);
   ROM_ADCSequenceEnable(ADC1_BASE, ADC_SEQUENCER);
 }
+
+
+static void
+setup_adc_timer_interrupts(void)
+{
+  ROM_ADCSequenceConfigure(ADC0_BASE, ADC_SEQUENCER, ADC_TRIGGER_TIMER, 0);
+  ROM_ADCIntEnable(ADC0_BASE, ADC_SEQUENCER);
+  ROM_IntEnable(INT_ADC0SS0);
+  ROM_ADCSequenceConfigure(ADC1_BASE, ADC_SEQUENCER, ADC_TRIGGER_TIMER, 0);
+  ROM_ADCIntEnable(ADC1_BASE, ADC_SEQUENCER);
+  ROM_IntEnable(INT_ADC1SS0);
+}
+
+
+static void
+adc_clear(void)
+{
+  ROM_ADCIntClear(ADC0_BASE, ADC_SEQUENCER);
+  ROM_ADCIntClear(ADC1_BASE, ADC_SEQUENCER);
+}
+
 
 static void
 adc_start(void)
 {
-  /*
-    For efficiency, let's just assume the ADC is done, don't check it.
-    So we don't need to clear the completion flag.
-    One PWM cycle of 50 kHz is plenty of time to do an ADC measurement.
-
-    ROM_ADCIntClear(ADC0_BASE, 3);
-    ROM_ADCIntClear(ADC1_BASE, 3);
-  */
+  adc_clear();
   // ROM_ADCProcessorTrigger(ADC0_BASE, ADC_SEQUENCER);
   HWREG(ADC0_BASE + ADC_O_PSSI) |= (1 << ADC_SEQUENCER);
   // ROM_ADCProcessorTrigger(ADC1_BASE, ADC_SEQUENCER);
@@ -365,6 +405,48 @@ dbg_dump_samples(void)
   }
 
   dbg_adc_idx = 0;
+}
+
+
+static inline void
+hw_pa_high(void)
+{
+  my_gpio_write(GPIO_PORTG_AHB_BASE, GPIO_PIN_0, GPIO_PIN_0);
+}
+
+
+static inline void
+hw_pb_high(void)
+{
+  my_gpio_write(GPIO_PORTG_AHB_BASE, GPIO_PIN_1, GPIO_PIN_1);
+}
+
+
+static inline void
+hw_pc_high(void)
+{
+  my_gpio_write(GPIO_PORTG_AHB_BASE, GPIO_PIN_2, GPIO_PIN_2);
+}
+
+
+static inline void
+hw_pa_low(void)
+{
+  my_gpio_write(GPIO_PORTG_AHB_BASE, GPIO_PIN_0, 0);
+}
+
+
+static inline void
+hw_pb_low(void)
+{
+  my_gpio_write(GPIO_PORTG_AHB_BASE, GPIO_PIN_1, 0);
+}
+
+
+static inline void
+hw_pc_low(void)
+{
+  my_gpio_write(GPIO_PORTG_AHB_BASE, GPIO_PIN_2, 0);
 }
 
 
@@ -829,6 +911,137 @@ motor_adjust_damper(uint32_t l_motor_tick, uint32_t l_step)
 }
 
 
+/*
+  Put voltage on one winding, while the other two windings are disconnected.
+  This will draw no current in the motor, but will put the supply voltage on
+  all three phases as well as on the neutral.
+
+  Measure the voltage on each phase/neutral using the ADC. This way, we can
+  measure any bias between them (eg. due to resistor tolerances), and later
+  adjust measurements to hopefully eliminate such bias.
+*/
+static void
+measure_voltage_divider_bias(void)
+{
+  uint32_t i, j, k, l;
+  uint32_t sum_phase[3], sum_neutral;
+  static const uint32_t REPEATS = 32;
+
+  sum_phase[0] = sum_phase[1] = sum_phase[2] = 0;
+  sum_neutral = 0;
+
+  for (k = 0; k < 3; ++k) {
+    const char *got_voltage;
+
+    switch(k) {
+    case 0:
+      hw_pa_high();
+      hw_pa_enable();
+      got_voltage = "A";
+      break;
+    case 1:
+      hw_pb_high();
+      hw_pb_enable();
+      got_voltage = "B";
+      break;
+    case 2:
+      hw_pc_high();
+      hw_pc_enable();
+      got_voltage = "C";
+      break;
+    }
+#ifdef BIAS_VERBOSE
+    serial_output_str("Putting voltage on phase ");
+    serial_output_str(got_voltage);
+    serial_output_str("\r\n");
+#else
+    (void)got_voltage;                          /* Silence compiler warning */
+#endif
+
+    ROM_SysCtlDelay(MCU_HZ/3/10);
+
+    for (j = 0; j < 3; ++j) {
+      uint32_t chan;
+
+      switch (j)  {
+      case 0:
+        chan = 1;
+        break;
+      case 1:
+        chan = 0;
+        break;
+      case 2:
+        chan = 10;
+        break;
+      }
+
+#ifdef BIAS_VERBOSE
+      serial_output_str("Start measure on phase ");
+      serial_output_str(which);
+      serial_output_str("\r\n");
+#endif
+      /* Read phase and neutral. */
+      HWREG(ADC0_BASE + ADC_O_SSMUX0) = chan * (uint32_t)0x11111111;
+      /* Run 2*REPEATS measurements, only using the later half ("warm-up"). */
+      for (l = 0; l < REPEATS*2; ++l) {
+        adc_start();
+        while (!adc_ready())
+          ;
+        if (l < REPEATS)
+          continue;
+
+#ifdef BIAS_VERBOSE
+        serial_output_str("Phase "); serial_output_str(which); serial_output_str(":");
+#endif
+        for (i = 0; i < 8; ++i) {
+          uint32_t adc_val = HWREG(ADC0_BASE + ADC_SEQUENCER_FIFO) & 0xfff;
+          sum_phase[j] += adc_val;
+#ifdef BIAS_VERBOSE
+          serial_output_str(" ");
+          print_uint32(adc_val);
+#endif
+        }
+#ifdef BIAS_VERBOSE
+        serial_output_str("\r\nNeutral:");
+#endif
+        for (i = 0; i < 8; ++i) {
+          uint32_t adc_val = HWREG(ADC1_BASE + ADC_SEQUENCER_FIFO) & 0xfff;
+          sum_neutral += adc_val;
+#ifdef BIAS_VERBOSE
+          serial_output_str(" ");
+          print_uint32(adc_val);
+#endif
+        }
+#ifdef BIAS_VERBOSE
+        serial_output_str("\r\n");
+#endif
+      }
+    }
+
+    /* Restore things, preparing for normal operation. */
+    hw_pa_low();
+    hw_pb_low();
+    hw_pc_low();
+    adc_clear();
+    ROM_SysCtlDelay(MCU_HZ/3/1000);
+    hw_pa_disable();
+    hw_pb_disable();
+    hw_pc_disable();
+  }
+
+  neutral_factor = SUPPLY_VOLTAGE*(float)(8*3*3*REPEATS)/(float)sum_neutral;
+  serial_output_str("Phase bias:");
+  for (j = 0; j < 3; ++j) {
+    phase_factor[j] = SUPPLY_VOLTAGE*(float)(8*3*REPEATS)/(float)sum_phase[j];
+    serial_output_str(" ");
+    print_float(neutral_factor*(1.0f/((float)(8*3*REPEATS)))*(float)sum_phase[j] -
+                neutral_factor*(1.0f/((float)(8*3*3*REPEATS)))*(float)sum_neutral,
+                1, 3);
+  }
+  serial_output_str("\r\n");
+}
+
+
 static void
 open_loop_adjust_speed(uint32_t l_motor_tick, uint32_t l_step)
 {
@@ -1031,9 +1244,14 @@ int main()
   ROM_IntPrioritySet(INT_ADC1SS0, 1 << 5);
 
   setup_controlpanel();
-  setup_adc();
+  setup_adc_basic();
+  setup_manual_l6234();
   motor_idle = 1;
   motor_set_damper(0.0f);
+
+  measure_voltage_divider_bias();
+
+  setup_adc_timer_interrupts();
   setup_timer_pwm();
   setup_systick();
 
