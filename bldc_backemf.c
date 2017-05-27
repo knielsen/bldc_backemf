@@ -1,4 +1,5 @@
 #include <stdint.h>
+#include <stdlib.h>
 #include <math.h>
 
 #include "inc/hw_gpio.h"
@@ -911,6 +912,26 @@ motor_adjust_damper(uint32_t l_motor_tick, uint32_t l_step)
 }
 
 
+static int
+cmp_ushort(const void *pa, const void *pb)
+{
+  uint16_t a = *(const uint16_t *)pa;
+  uint16_t b = *(const uint16_t *)pb;
+  if (a < b)
+    return -1;
+  else if (a > b)
+    return 1;
+  else
+    return 0;
+}
+
+
+#define REPEATS 32
+#define PHASE_MEASURE_SIZE (8*REPEATS*3*2)
+#if 6*PHASE_MEASURE_SIZE > DBG_NUM_SAMPLES*2
+#error Too many phase measurement samples to fit in buffer
+#endif
+
 /*
   Put voltage on one winding, while the other two windings are disconnected.
   This will draw no current in the motor, but will put the supply voltage on
@@ -924,11 +945,14 @@ static void
 measure_voltage_divider_bias(void)
 {
   uint32_t i, j, k, l;
-  uint32_t sum_phase[3], sum_neutral;
-  static const uint32_t REPEATS = 32;
+  uint16_t *val_phase[3], *val_neutral;
+  uint16_t med_neutral;
 
-  sum_phase[0] = sum_phase[1] = sum_phase[2] = 0;
-  sum_neutral = 0;
+  /* Reuse the dbg_adc_samples buffer, to save RAM. */
+  val_phase[0] = (uint16_t *)((char *)dbg_adc_samples + 0);
+  val_phase[1] = (uint16_t *)((char *)dbg_adc_samples + PHASE_MEASURE_SIZE);
+  val_phase[2] = (uint16_t *)((char *)dbg_adc_samples + 2*PHASE_MEASURE_SIZE);
+  val_neutral  = (uint16_t *)((char *)dbg_adc_samples + 3*PHASE_MEASURE_SIZE);
 
   for (k = 0; k < 3; ++k) {
     const char *got_voltage;
@@ -984,6 +1008,11 @@ measure_voltage_divider_bias(void)
       HWREG(ADC0_BASE + ADC_O_SSMUX0) = chan * (uint32_t)0x11111111;
       /* Run 2*REPEATS measurements, only using the later half ("warm-up"). */
       for (l = 0; l < REPEATS*2; ++l) {
+        /*
+          A small delay before next measurement seems to greatly help get more
+          stable ADC readings.
+        */
+        ROM_SysCtlDelay(MCU_HZ/3/1000);
         adc_start();
         while (!adc_ready())
           ;
@@ -995,7 +1024,7 @@ measure_voltage_divider_bias(void)
 #endif
         for (i = 0; i < 8; ++i) {
           uint32_t adc_val = HWREG(ADC0_BASE + ADC_SEQUENCER_FIFO) & 0xfff;
-          sum_phase[j] += adc_val;
+          val_phase[j][i+l*8+k*8*REPEATS] = adc_val;
 #ifdef BIAS_VERBOSE
           serial_output_str(" ");
           print_uint32(adc_val);
@@ -1006,7 +1035,7 @@ measure_voltage_divider_bias(void)
 #endif
         for (i = 0; i < 8; ++i) {
           uint32_t adc_val = HWREG(ADC1_BASE + ADC_SEQUENCER_FIFO) & 0xfff;
-          sum_neutral += adc_val;
+          val_neutral[i+l*8+j*8*REPEATS+k*8*REPEATS*3] = adc_val;
 #ifdef BIAS_VERBOSE
           serial_output_str(" ");
           print_uint32(adc_val);
@@ -1029,17 +1058,23 @@ measure_voltage_divider_bias(void)
     hw_pc_disable();
   }
 
-  neutral_factor = SUPPLY_VOLTAGE*(float)(8*3*3*REPEATS)/(float)sum_neutral;
+  /* Find the median. */
+  qsort(val_neutral, 3*3*8*REPEATS, sizeof(uint16_t), cmp_ushort);
+  med_neutral = val_neutral[3*3*8*REPEATS/2];
+  neutral_factor = SUPPLY_VOLTAGE/(float)med_neutral;
   serial_output_str("Phase bias:");
   for (j = 0; j < 3; ++j) {
-    phase_factor[j] = SUPPLY_VOLTAGE*(float)(8*3*REPEATS)/(float)sum_phase[j];
+    uint16_t med_phase;
+    qsort(val_phase[j], 3*8*REPEATS, sizeof(uint16_t), cmp_ushort);
+    med_phase = val_phase[j][3*8*REPEATS/2];
+    phase_factor[j] = SUPPLY_VOLTAGE/(float)med_phase;
     serial_output_str(" ");
-    print_float(neutral_factor*(1.0f/((float)(8*3*REPEATS)))*(float)sum_phase[j] -
-                neutral_factor*(1.0f/((float)(8*3*3*REPEATS)))*(float)sum_neutral,
-                1, 3);
+    print_float(neutral_factor*(float)med_phase - neutral_factor*(float)med_neutral,
+                2, 3);
   }
   serial_output_str("\r\n");
 }
+#undef REPEATS
 
 
 static void
