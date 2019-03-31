@@ -32,7 +32,7 @@
 #define MCU_HZ 80000000
 
 
-#define DAMPER_VALUE 0.20f
+#define DAMPER_VALUE 0.3f
 
 /* Electric rotations per mechanical rotation. */
 #define ELECTRIC2MECHANICAL 6
@@ -796,10 +796,11 @@ do_enable_disable(void)
 
 /* Number of mechanical revolutions made by motor. */
 static volatile uint32_t motor_revolutions = 0;
-/* Tick counter at last commute step. */
-static volatile uint32_t motor_last_commute = 0;
-/* Duration, in motor ticks, of last commute step. */
-static uint32_t motor_last_commute_duration = 0;
+#define SAVED_COMMUTE_STEP_TICKS 8
+/* Tick counter at last commute steps. */
+static volatile uint32_t motor_last_commute[SAVED_COMMUTE_STEP_TICKS];
+/* Current index into motor_last_commute (last updated value). */
+static volatile uint32_t motor_last_commute_idx = 0;
 /* Target duration of this commute step, or 0 if not yet known. */
 static uint32_t motor_commute_target = 0;
 /* Current motor commute step (0..5). */
@@ -1086,9 +1087,14 @@ closed_loop_detect_zero_crossing(uint32_t delta, uint32_t l_step)
   if ((!(l_step & 1) && backemf < 0.0f) || ((l_step & 1) && backemf > 0.0f)) {
     /*
       Zero-crossing detected. Set next commute target to estimated 30
-      electrical degrees (1/2 of last commute period).
+      electrical degrees (1/12 of last 6 commute periods == last electrical
+      revolution).
     */
-    l_target = delta + motor_last_commute_duration/2 - 2;
+    uint32_t cur_idx = motor_last_commute_idx;
+    uint32_t prev_idx = (cur_idx + (SAVED_COMMUTE_STEP_TICKS - 6)) % SAVED_COMMUTE_STEP_TICKS;
+    uint32_t motor_last_commute_duration =
+      motor_last_commute[cur_idx] - motor_last_commute[prev_idx];
+    l_target = delta + motor_last_commute_duration/12 - 2;
     if (l_target < 10)
       l_target = 10;
     else if (l_target > 2000)
@@ -1135,11 +1141,12 @@ motor_update()
   l_motor_tick = motor_tick;
 
   if (!motor_idle) {
+    uint32_t l_idx = motor_last_commute_idx;
     l_spinning_up = motor_spinning_up;
     l_step = motor_commute_step;
 
     /* Check if it is time for a new commute step. */
-    delta = l_motor_tick - motor_last_commute;
+    delta = l_motor_tick - motor_last_commute[l_idx];
     l_target = motor_commute_target;
     if (l_target && delta >= l_target) {
       ++l_step;
@@ -1149,8 +1156,11 @@ motor_update()
       }
       setup_commute_step(l_step);
       motor_commute_step = l_step;
-      motor_last_commute = l_motor_tick;
-      motor_last_commute_duration = delta;
+      ++l_idx;
+      if (l_idx == SAVED_COMMUTE_STEP_TICKS)
+        l_idx = 0;
+      motor_last_commute[l_idx] = l_motor_tick;
+      motor_last_commute_idx = l_idx;
       delta = 0;
 
       if (l_spinning_up) {
@@ -1281,7 +1291,15 @@ int main()
     last_time = cur_time;
 
     serial_output_str("Speed: ");
-    println_float(motor_cur_speed*(1.0f/(float)ELECTRIC2MECHANICAL), 2, 2);
+    //println_float(motor_cur_speed*(1.0f/(float)ELECTRIC2MECHANICAL), 2, 2);
+    {
+      uint32_t l_idx = motor_last_commute_idx;
+      uint32_t cur = motor_last_commute[l_idx];
+      uint32_t prev = motor_last_commute[(l_idx + (SAVED_COMMUTE_STEP_TICKS-6))%SAVED_COMMUTE_STEP_TICKS];
+      uint32_t delta = cur - prev;
+      float speed = (float)PWM_FREQ / (float)delta / (float)ELECTRIC2MECHANICAL;
+      println_float(speed, 2, 2);
+    }
     if (check_start_stop_switch()) {
       if (motor_idle)
         /* Spin up the motor a bit. */
