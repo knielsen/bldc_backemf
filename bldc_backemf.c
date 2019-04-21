@@ -32,7 +32,7 @@
 #define MCU_HZ 80000000
 
 
-#define DAMPER_VALUE 0.3f
+#define DAMPER_VALUE 0.25f
 
 /* Electric rotations per mechanical rotation. */
 #define ELECTRIC2MECHANICAL 6
@@ -1308,6 +1308,6 @@ int main()
       start_spin_down();
     }
 
-    dbg_dump_samples();
+    //dbg_dump_samples();
   }
 }
