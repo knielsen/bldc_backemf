@@ -17,7 +17,7 @@ INC=-I/home/knielsen/devel/study/stellaris-arm/SW-EK-LM4F120XL-9453 -DPART_LM4F1
 CFLAGS=-g -O3  -std=c99 -Wall -pedantic $(ARCH_CFLAGS) $(INC)
 LDFLAGS=--entry ResetISR --gc-sections
 
-OBJS = $(TARGET).o dbg.o led.o
+OBJS = $(TARGET).o dbg.o led.o nrf.o #usb.o
 
 all: $(TARGET).bin
 
@@ -33,6 +33,10 @@ $(STARTUP).o: $(STARTUP).c
 dbg.o: dbg.c dbg.h
 
 led.o: led.c led.h
+
+#usb.c: bldc_backemf.h
+
+nrf.c: bldc_backemf.h
 
 %.o: %.c
 	$(CC) $(CFLAGS) -c $< -o $@

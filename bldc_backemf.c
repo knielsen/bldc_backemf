@@ -1,18 +1,12 @@
-#include <stdint.h>
-#include <stdlib.h>
 #include <math.h>
+#include <stdlib.h>
 
-#include "inc/hw_gpio.h"
-#include "inc/hw_memmap.h"
-#include "inc/hw_sysctl.h"
-#include "inc/hw_types.h"
+#include "bldc_backemf.h"
+
 #include "inc/hw_ints.h"
 #include "inc/hw_timer.h"
 #include "inc/hw_nvic.h"
 #include "inc/hw_adc.h"
-#include "driverlib/gpio.h"
-#include "driverlib/rom.h"
-#include "driverlib/sysctl.h"
 #include "driverlib/uart.h"
 #include "driverlib/timer.h"
 #include "driverlib/interrupt.h"
@@ -23,13 +17,46 @@
 
 
 /*
-  Switch 1 (?): PC4
-  switch 3 (start/stop motor): PA6
+  nRF24L01 pinout:
+
+  Tx:
+    PF2  SCK        GND *1 2. VCC
+    PF3  CSN        PB3 .3 4. PF3
+    PF0  MISO       PF2 .5 6. PF1
+    PF1  MOSI       PF0 .7 8. PB0
+    PB0  IRQ
+    PB3  CE
+
+  L6234 motor controller pinout:
+
+    IN1   PG0   (timer t4ccp0)
+    IN2   PG1   (timer t4ccp1)
+    IN3   PG2   (timer t5ccp0)
+    EN1   PG3
+    EN2   PG4
+    EN3   PG5
+
+  ADC channels to measure the back-emf:
+
+    PE2   phase A   AIN1
+    PE3   phase B   AIN0
+    PB4   phase C   AIN10
+    PD3   neutral   AIN4
+
+  Switches and buttons pintout:
+
+    PC4   Switch 1
+    PC7   Switch 2
+    PA6   Switch 3  (start/stop motor)
+
+  Playstation 2 / DualShock controller:
+    PA2   PS2 SCLK
+    PA3   PS2 controller 2 "attention" (slave select)
+    PA4   PS2 data
+    PA5   PS2 cmd
+    PC5   PS2 ack
+    PC6   PS2 controller 1 "attention"
 */
-
-
-/* To change this, must fix clock setup in the code. */
-#define MCU_HZ 80000000
 
 
 #define DAMPER_VALUE 0.25f
@@ -44,9 +71,6 @@
 
 /* L6234 adds 300 ns of deadtime. */
 #define DEADTIME (MCU_HZ/1000*300/1000000)
-
-
-static const float F_PI = 3.141592654f;
 
 
 /*
@@ -338,7 +362,7 @@ dbg_add_samples_buf(uint16_t *phases, uint16_t *neutrals, uint32_t count,
 }
 
 
-static void
+static void __attribute__((unused))
 dbg_dump_samples(void)
 {
   uint32_t l_idx, i;
@@ -1259,6 +1283,8 @@ int main()
   ROM_IntPrioritySet(INT_ADC1SS0, 1 << 5);
 
   setup_controlpanel();
+  config_ssi_gpio();
+
   setup_adc_basic();
   setup_manual_l6234();
   motor_idle = 1;
