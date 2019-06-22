@@ -1,5 +1,7 @@
 TARGET=bldc_backemf
 
+SWDIR=/home/knielsen/devel/study/stellaris-arm/SW-EK-LM4F120XL-9453
+
 GCCDIR=/home/knielsen/devel/study/stellaris-arm/install
 BINDIR=/usr/bin
 CC=$(BINDIR)/arm-none-eabi-gcc
@@ -14,25 +16,30 @@ FP_LDFLAGS= -L$(GCCDIR)/arm-none-eabi/lib/thumb/cortex-m4/float-abi-hard/fpuv4-s
 
 ARCH_CFLAGS=-mthumb -mcpu=cortex-m4 -mfpu=fpv4-sp-d16 -mfloat-abi=hard -ffunction-sections -fdata-sections -DTARGET_IS_BLIZZARD_RA1
 INC=-I/home/knielsen/devel/study/stellaris-arm/SW-EK-LM4F120XL-9453 -DPART_LM4F131H5QR
-CFLAGS=-g -O3  -std=c99 -Wall -pedantic $(ARCH_CFLAGS) $(INC)
+CFLAGS=-g -O3 -std=c99 -Wall -pedantic -Dgcc $(ARCH_CFLAGS) $(INC)
 LDFLAGS=--entry ResetISR --gc-sections
 
-OBJS = $(TARGET).o dbg.o led.o
+OBJS = $(TARGET).o dbg.o led.o nrf.o ps2.o usb.o usb_serial_structs.o
+LIBS = $(SWDIR)/usblib/gcc-cm4f/libusb-cm4f.a $(SWDIR)/driverlib/gcc-cm4f/libdriver-cm4f.a
 
 all: $(TARGET).bin
 
 $(TARGET).bin: $(TARGET).elf
 
 $(TARGET).elf: $(OBJS) $(STARTUP).o $(LINKSCRIPT)
-	$(LD) $(LDFLAGS) -T $(LINKSCRIPT) -o $@ $(STARTUP).o $(OBJS) $(FP_LDFLAGS)
+	$(LD) $(LDFLAGS) -T $(LINKSCRIPT) -o $@ $(STARTUP).o $(OBJS) $(LIBS) $(FP_LDFLAGS)
 
 $(TARGET).o: $(TARGET).c dbg.h
 
 $(STARTUP).o: $(STARTUP).c
 
+bldc_backemf.o: bldc_backemf.h dbg.h ps2.h nrf.h usb.h
 dbg.o: dbg.c dbg.h
-
-led.o: led.c led.h
+led.o: bldc_backemf.h
+usb.o: bldc_backemf.h usb.h
+nrf.o: bldc_backemf.h nrf.h dbg.h
+ps2.o: bldc_backemf.h ps2.h dbg.h
+usb_serial_structs.o: usb_serial_structs.h
 
 %.o: %.c
 	$(CC) $(CFLAGS) -c $< -o $@

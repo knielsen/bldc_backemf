@@ -1,36 +1,88 @@
-#include <stdint.h>
-#include <stdlib.h>
 #include <math.h>
+#include <stdlib.h>
+#include <string.h>
 
-#include "inc/hw_gpio.h"
-#include "inc/hw_memmap.h"
-#include "inc/hw_sysctl.h"
-#include "inc/hw_types.h"
+#include "bldc_backemf.h"
+#include "dbg.h"
+#include "ps2.h"
+#include "nrf.h"
+#include "usb.h"
+
 #include "inc/hw_ints.h"
 #include "inc/hw_timer.h"
 #include "inc/hw_nvic.h"
 #include "inc/hw_adc.h"
-#include "driverlib/gpio.h"
-#include "driverlib/rom.h"
-#include "driverlib/sysctl.h"
 #include "driverlib/uart.h"
 #include "driverlib/timer.h"
 #include "driverlib/interrupt.h"
 #include "driverlib/adc.h"
 
-#include "dbg.h"
-#include "led.h"
-
 
 /*
-  Switch 1 (?): PC4
-  switch 3 (start/stop motor): PA6
+  nRF24L01 pinout:
+
+  Tx:
+    PF2  SCK        GND *1 2. VCC
+    PF3  CSN        PB3 .3 4. PF3
+    PF0  MISO       PF2 .5 6. PF1
+    PF1  MOSI       PF0 .7 8. PB0
+    PB0  IRQ
+    PB3  CE
+
+  L6234 motor controller pinout:
+
+    IN1   PG0   (timer t4ccp0)
+    IN2   PG1   (timer t4ccp1)
+    IN3   PG2   (timer t5ccp0)
+    EN1   PG3
+    EN2   PG4
+    EN3   PG5
+
+  ADC channels to measure the back-emf:
+
+    PE2   phase A   AIN1
+    PE3   phase B   AIN0
+    PB4   phase C   AIN10
+    PD3   neutral   AIN4
+
+  Switches and buttons pintout:
+
+    PC4   Switch 1
+    PC7   Switch 2
+    PA6   Switch 3  (start/stop motor)
+
+  Playstation 2 / DualShock controller:
+    PA2   PS2 SCLK
+    PA3   PS2 controller 2 "attention" (slave select)
+    PA4   PS2 data
+    PA5   PS2 cmd
+    PC5   PS2 ack
+    PC6   PS2 controller 1 "attention"
 */
 
 
-/* To change this, must fix clock setup in the code. */
-#define MCU_HZ 80000000
+/*
+  Peripheral interrupt usage:
 
+    gpiob         nRF24L01+ interrupt pin
+
+    (timer1a)     Not used for interrupt, but to trigger dma to ssi0 Tx
+    timer1b       PS2 controller periodic poll
+    timer2a       nRF async delay timer
+    timer3a       BLDC interrupt at the start of PWM period
+    timer3b       BLDC trigger ADC measurements
+
+    timer4a  \
+    timer4b  +--  BLDC motor pwm
+    timer5a  /
+
+    adc0          BLDC back-emf measurement of phases
+    adc1          BLDC back-emf measurement of neutral
+
+    ssi0          PS2 controller readout
+    ssi1          nRF24L01+ access
+    usb0
+*/
 
 #define DAMPER_VALUE 0.25f
 
@@ -45,8 +97,10 @@
 /* L6234 adds 300 ns of deadtime. */
 #define DEADTIME (MCU_HZ/1000*300/1000000)
 
+//#define BIAS_VERBOSE
 
-static const float F_PI = 3.141592654f;
+/* Control block for DMA. */
+uint32_t udma_control_block[256] __attribute__ ((aligned(1024)));
 
 
 /*
@@ -57,32 +111,6 @@ static float phase_factor[4];
 
 
 static void motor_update(void);
-
-
-static void
-setup_controlpanel(void)
-{
-
-  /* Switch 1 & 3 on PC4 & PA6. */
-  ROM_SysCtlPeripheralEnable(SYSCTL_PERIPH_GPIOA);
-  ROM_SysCtlGPIOAHBEnable(SYSCTL_PERIPH_GPIOA);
-  ROM_SysCtlPeripheralEnable(SYSCTL_PERIPH_GPIOC);
-  ROM_SysCtlGPIOAHBEnable(SYSCTL_PERIPH_GPIOC);
-  ROM_GPIODirModeSet(GPIO_PORTA_AHB_BASE, GPIO_PIN_6, GPIO_DIR_MODE_IN);
-  ROM_GPIOPadConfigSet(GPIO_PORTA_AHB_BASE, GPIO_PIN_6,
-                       GPIO_STRENGTH_2MA, GPIO_PIN_TYPE_STD_WPU);
-  ROM_GPIODirModeSet(GPIO_PORTC_AHB_BASE, GPIO_PIN_4, GPIO_DIR_MODE_IN);
-  ROM_GPIOPadConfigSet(GPIO_PORTC_AHB_BASE, GPIO_PIN_4,
-                       GPIO_STRENGTH_2MA, GPIO_PIN_TYPE_STD_WPU);
-}
-
-
-static uint32_t
-check_start_stop_switch(void)
-{
-  long start_stop_switch = my_gpio_read(GPIO_PORTA_AHB_BASE, GPIO_PIN_6);
-  return (start_stop_switch == 0);
-}
 
 
 /*
@@ -319,7 +347,7 @@ adc_ready(void)
   upper bits for flags. We use the upper two bits to store which phase
   (0..2) or neutral (3) was measured.
 */
-#define DBG_NUM_SAMPLES 12000
+#define DBG_NUM_SAMPLES 8000
 static volatile uint16_t dbg_adc_samples[DBG_NUM_SAMPLES];
 static volatile uint32_t dbg_adc_idx = 0;
 
@@ -338,7 +366,7 @@ dbg_add_samples_buf(uint16_t *phases, uint16_t *neutrals, uint32_t count,
 }
 
 
-static void
+static void __attribute__((unused))
 dbg_dump_samples(void)
 {
   uint32_t l_idx, i;
@@ -687,14 +715,6 @@ setup_systick(void)
 }
 
 
-static const uint32_t time_period= 0x1000000;
-static inline uint32_t
-get_time(void)
-{
-  return HWREG(NVIC_ST_CURRENT);
-}
-
-
 static void
 setup_commute(int32_t pa, int32_t pb, int32_t pc)
 {
@@ -814,7 +834,7 @@ static volatile uint32_t motor_speed_change_end = 0;
 static volatile float motor_speed_start = 0.0f;
 static volatile float motor_speed_end = 0.0f;
 
-static volatile uint32_t motor_idle = 1;
+volatile uint32_t motor_idle = 1;
 static volatile uint32_t motor_spinning_down = 0;
 static volatile uint32_t motor_spin_down_start = 0;
 static volatile uint32_t motor_spin_down_end = 0;
@@ -956,16 +976,20 @@ measure_voltage_divider_bias(void)
 
     for (j = 0; j < 3; ++j) {
       uint32_t chan;
+      const char *which;
 
       switch (j)  {
       case 0:
         chan = 1;
+        which = "A";
         break;
       case 1:
         chan = 0;
+        which = "B";
         break;
       case 2:
         chan = 10;
+        which = "C";
         break;
       }
 
@@ -973,6 +997,8 @@ measure_voltage_divider_bias(void)
       serial_output_str("Start measure on phase ");
       serial_output_str(which);
       serial_output_str("\r\n");
+#else
+    (void)which;                                /* Silence compiler warning */
 #endif
       /* Read phase and neutral. */
       HWREG(ADC0_BASE + ADC_O_SSMUX0) = chan * (uint32_t)0x11111111;
@@ -1234,10 +1260,338 @@ start_spin_down(void)
 }
 
 
+void
+start_motor(void)
+{
+  if (motor_idle)
+  {
+    /* Spin up the motor a bit. */
+    start_open_loop(0.05f, 3.0f, 3.0f);
+  }
+}
+
+
+void
+stop_motor(void)
+{
+  if (!motor_idle)
+    start_spin_down();
+}
+
+
+static uint32_t
+my_strlen(const char *s)
+{
+  uint32_t len = 0;
+  while (*s++)
+    ++len;
+  return len;
+}
+
+
+static uint32_t last_button_time = 0xffffffff;
+static uint32_t keypress_retransmit = 0;
+static uint32_t keydata_sofar = 0;
+static uint32_t usb_sofar = 0;
+
+
+/*
+  Read a packet from USB. A packet is 32 (NRF_PACKET_SIZE) bytes of data.
+
+  Handles sync-up by resetting the state (and resetting the packet buffer to
+  empty) whenever more than 0.2 seconds pass without any data received.
+
+  Returns a true value if a reset was done, false if not.
+
+  The KEYS argument enables checking for button presses and returning them
+  as a fake packet.
+*/
+static uint32_t
+usb_get_packet(uint8_t *packet_buf, uint32_t max_reset_count,
+               uint32_t *timeout_flag, uint32_t keys)
+{
+  uint32_t reset = 0;
+  uint32_t sofar = 0;
+  uint32_t start_time;
+  uint32_t cur_time;
+  uint8_t val;
+  uint32_t h, t;
+  uint32_t reset_count;
+
+  if (max_reset_count > 0)
+    *timeout_flag = 0;
+  while (sofar < NRF_PACKET_SIZE)
+  {
+    t = usb_recvbuf.tail;
+    start_time = get_time();
+    reset_count = 0;
+    while ((h = usb_recvbuf.head) == t)
+    {
+      /* Simple sync method: if data stream pauses, then reset state. */
+      if (calc_time(start_time) > MCU_HZ/5)
+      {
+        sofar = 0;
+        reset = 1;
+        start_time = get_time();
+        if (max_reset_count > 0)
+        {
+          ++reset_count;
+          if (reset_count >= max_reset_count)
+          {
+            *timeout_flag = 1;
+            return reset;
+          }
+        }
+      }
+
+      /* Every 4 milliseconds, read the buttons. */
+      cur_time = get_time();
+      if (last_button_time == 0xffffffff ||
+          calc_time_from_val(last_button_time, cur_time) > MCU_HZ/250 ||
+          (keydata_sofar > 0 && !transmit_running))
+      {
+        last_button_time = cur_time;
+        check_buttons();
+#if 0
+        {
+          uint32_t i;
+          for (i = 0 ; i < 19; ++i)
+            serial_output_hexbyte(button_status[i]);
+          serial_output_str("\r\n");
+        }
+#endif
+
+        /* Only if not sending framebuffer data, and no partial usb packet */
+        if (keys &&
+            (transmit_running != TRANSMIT_RUNNING_FRAMEDATA) &&
+            usb_sofar == 0)
+        {
+          int diff = memcmp(button_status, prev_button_status, sizeof(button_status));
+          /*
+            We return a keypress packet if key state has changed. And after
+            such change, we return further keypress packets to increase the
+            likeliness that at least one will arrive even in case of noise on
+            the wireless transmission.
+
+            We also return a keypress packet if there is any existing keypress
+            data pending, and the nRf interrupt state machine is ready to send
+            a new batch.
+           */
+          if (diff ||
+              keypress_retransmit > 0 ||
+              (keydata_sofar > 0 && !transmit_running))
+          {
+            if (diff)
+              keypress_retransmit = KEY_RETRANSMITS;
+            /* Create a fake packet containing key presses. */
+            packet_buf[0] = POV_CMD_CONFIG;
+            packet_buf[1] = POV_SUBCMD_KEYPRESSES;
+            memcpy(packet_buf+2, button_status, sizeof(button_status));
+            memset(packet_buf+2+sizeof(button_status), 0,
+                   NRF_PACKET_SIZE-(2+sizeof(button_status)));
+            memcpy(prev_button_status, button_status, sizeof(prev_button_status));
+            if (keypress_retransmit > 0)
+              --keypress_retransmit;
+            return reset;
+          }
+        }
+      }
+    }
+    val = usb_recvbuf.buf[t];
+    ++t;
+    if (t >= USB_RECV_BUF_SIZE)
+      t = 0;
+    usb_recvbuf.tail = t;
+    packet_buf[sofar++] = val;
+  }
+
+  return reset;
+}
+
+
+/*
+  Delay until specified amount of systicks have passed.
+
+  As systick is a 24-bit counter, the amount cannot exceed 0xffffff, or a bit
+  more than 16000000.
+*/
+static void
+delay_systicks(uint32_t cycles)
+{
+  uint32_t start = get_time();
+
+  while (calc_time(start) < cycles)
+    ;
+}
+
+
+void
+delay_us(uint32_t us)
+{
+  /* This assumes that MCU_HZ is divisible by 1000000. */
+  uint32_t cycles = (MCU_HZ/1000000)*us;
+#if (MCU_HZ % 1000000)
+#error delay_us() computes delay incorrectly if MCU_HZ is not a multiple of 1000000
+#endif
+
+  while (cycles > 0xffffff)
+  {
+    delay_systicks(0xffffff/2);
+    cycles -= 0xffffff/2;
+  }
+  delay_systicks(cycles);
+}
+
+
+static void
+handle_cmd_debug(uint8_t *packet)
+{
+  uint8_t subcmd= packet[1];
+  uint32_t usb_timeout = 0;
+  static const uint32_t usb_timeout_seconds = 5;
+
+  /* First we need to wait for any on-going transmit to complete. */
+  while (transmit_running)
+    ;
+  delay_us(40000);
+
+  if (subcmd == POV_SUBCMD_RESET_TO_BOOTLOADER)
+  {
+    /*
+      This debug command is sent to the application, not to the bootloader.
+      It requests the app to execute a software reset to get to the bootloader,
+      avoiding the need for manual press of the reset button.
+
+      Since we are using back-to-back transmission in the app for maximum
+      throughput, without automatic ack and re-transmit, we here send the
+      packet three times, to decrease the risk of it getting lost.
+    */
+    nrf_transmit_packet_nack(packet);
+    delay_us(40000);
+    nrf_transmit_packet_nack(packet);
+    delay_us(40000);
+    nrf_transmit_packet_nack(packet);
+    delay_us(40000);
+    /* Grab the next packet for the bootloader. */
+    usb_get_packet(packet, usb_timeout_seconds*5, &usb_timeout, 0);
+  }
+
+  nrf_config_bootload_tx(NRF_SSI_BASE, NRF_CSN_BASE, NRF_CSN_PIN);
+
+  while (!usb_timeout)
+  {
+    const char *errmsg;
+    uint8_t subcmd = packet[1];
+
+    /*
+      Normally, we should exit after we have seen POV_SUBCMD_EXIT_DEBUG.
+      But if we happen to get interrupted in the middle of something,
+      exit if we see any non-debug command (for now, unfortunately that
+      command will be lost).
+    */
+    if (packet[0] != POV_CMD_DEBUG || subcmd == POV_SUBCMD_EXIT_DEBUG)
+      break;
+
+    errmsg = nrf_transmit_packet(packet);
+
+    if (!errmsg &&
+        (subcmd == POV_SUBCMD_FLASH_BUFFER ||
+         subcmd == POV_SUBCMD_ENTER_BOOTLOADER))
+    {
+      /* Get the status reply from the bootloader. */
+      uint32_t start_time, wait_counter;
+
+      nrf_config_bootload_rx(NRF_SSI_BASE, NRF_CSN_BASE, NRF_CSN_PIN);
+      nrf_ce_high(NRF_CE_BASE, NRF_CE_PIN);
+      /*
+        nRF24L01+ datasheet says that there must be at least 4 microseconds
+        from a positive edge on CE to CSN being taken low.
+      */
+      delay_us(4);
+
+      start_time = get_time();
+      /*
+        For STM32F4, we have big sectors (up to 128MB). According to the data
+        sheet, they can take up to 4s to erase maximum, plus another up to
+        100us maximum per word to write. So the worst case latency is actually
+        up to around 8 seconds, though the common case should be much faster.
+      */
+      wait_counter = 80;  /* 8.0 seconds */
+      while (wait_counter > 0)
+      {
+        uint32_t now_time;
+        uint32_t status = nrf_get_status(NRF_SSI_BASE,
+                                         NRF_CSN_BASE, NRF_CSN_PIN);
+        if (status & nRF_RX_DR)
+          break;                                    /* Data ready. */
+        now_time = get_time();
+        if (calc_time_from_val(start_time, now_time) > MCU_HZ/10)
+        {
+          --wait_counter;
+          start_time = dec_time(start_time, MCU_HZ/10);
+        }
+      }
+      nrf_ce_low(NRF_CE_BASE, NRF_CE_PIN);
+
+      if (!wait_counter)
+        errmsg = "E: Timeout waiting for reply from bootloader\r\n";
+      else
+      {
+        nrf_rx(packet, NRF_PACKET_SIZE,
+               NRF_SSI_BASE, NRF_CSN_BASE, NRF_CSN_PIN);
+        if (packet[0] != POV_CMD_DEBUG || packet[1] != POV_SUBCMD_STATUS_REPLY)
+          errmsg = "E: Unexpected reply packet from bootloader\r\n";
+        else if (packet[2])
+          errmsg = "E: Error status reply from bootloader\r\n";
+      }
+      nrf_config_bootload_tx(NRF_SSI_BASE, NRF_CSN_BASE, NRF_CSN_PIN);
+    }
+
+    if (errmsg)
+      usb_data_put((const unsigned char *)errmsg, my_strlen(errmsg));
+    else
+      usb_data_put((const unsigned char *)"OK\r\n", 4);
+
+    /* Get the next command over USB from the programmer. */
+    usb_get_packet(packet, usb_timeout_seconds*5, &usb_timeout, 0);
+  }
+  if (usb_timeout)
+  {
+    static const char inactivity_error[] =
+      "E: No activity on USB, leaving debug mode\r\n";
+    usb_data_put((const unsigned char *)&inactivity_error[0],
+                 sizeof(inactivity_error)-1);
+    delay_us(200000);
+  }
+
+  nrf_config_normal_tx(NRF_SSI_BASE, NRF_CSN_BASE, NRF_CSN_PIN);
+}
+
+
+static void
+handle_cmd_set_config(uint8_t *packet)
+{
+  /* First we need to wait for any on-going transmit to complete. */
+  while (transmit_running)
+    ;
+  delay_us(40000);
+
+  /*
+    As we are transmitting without acks from the receiver, transmit the
+    command 3 times to maximise the changes that it will be received.
+  */
+  nrf_transmit_packet_nack(packet);
+  delay_us(40000);
+  nrf_transmit_packet_nack(packet);
+  delay_us(40000);
+  nrf_transmit_packet_nack(packet);
+  delay_us(40000);
+}
+
+
 int main()
 {
-  uint32_t last_time;
-  uint32_t led_state;
+  uint32_t read_idx;
 
   /* Use the full 80MHz system clock. */
   ROM_SysCtlClockSet(SYSCTL_SYSDIV_2_5 | SYSCTL_USE_PLL |
@@ -1257,8 +1611,16 @@ int main()
   ROM_IntPrioritySet(INT_TIMER3B, 2 << 5);
   ROM_IntPrioritySet(INT_ADC0SS0, 1 << 5);
   ROM_IntPrioritySet(INT_ADC1SS0, 1 << 5);
+  /* Playstation DualShock interrupt priority. */
+  ROM_IntPrioritySet(INT_SSI0, 3 << 5);
+  ROM_IntPrioritySet(INT_TIMER1B, 5 << 5);
+  ROM_IntPrioritySet(INT_USB0, 5 << 5);
 
-  setup_controlpanel();
+  setup_systick();
+  setup_ps2();
+  setup_nrf();
+  config_usb();
+
   setup_adc_basic();
   setup_manual_l6234();
   motor_idle = 1;
@@ -1268,46 +1630,71 @@ int main()
 
   setup_adc_timer_interrupts();
   setup_timer_pwm();
-  setup_systick();
+
+  start_ps2_interrupts();
+
+  nrf_startup();
+
+  /* Small delay to allow USB to get up before starting motor. */
+  ROM_SysCtlDelay(MCU_HZ/3);
 
   serial_output_str("Motor controller init done\r\n");
 
-  last_time = get_time();
-  led_state = 0;
-  for (;;) {
-    uint32_t cur_time;
+  usb_sofar = 0;
+  read_idx = 0;
+  nrf_write_idx = 1;
+  for (;;)
+  {
+    uint8_t val;
+    uint8_t usb_packet[NRF_PACKET_SIZE];
 
-    if (!led_state) {
-      led_on();
-      led_state = 1;
-    } else {
-      led_off();
-      led_state = 0;
-    }
-
-    do {
-      cur_time = get_time();
-    } while (((last_time - cur_time) & (time_period - 1)) < MCU_HZ/10);
-    last_time = cur_time;
-
-    serial_output_str("Speed: ");
-    //println_float(motor_cur_speed*(1.0f/(float)ELECTRIC2MECHANICAL), 2, 2);
+    /* Wait for a packet on the USB. */
+    if (usb_get_packet(usb_packet, 0, NULL, 1))
     {
-      uint32_t l_idx = motor_last_commute_idx;
-      uint32_t cur = motor_last_commute[l_idx];
-      uint32_t prev = motor_last_commute[(l_idx + (SAVED_COMMUTE_STEP_TICKS-6))%SAVED_COMMUTE_STEP_TICKS];
-      uint32_t delta = cur - prev;
-      float speed = (float)PWM_FREQ / (float)delta / (float)ELECTRIC2MECHANICAL;
-      println_float(speed, 2, 2);
+      /*
+        If we had a resync on the USB, then reset the frame packet count.
+        We do not want to transmit a half-received frame to the POV.
+      */
+      usb_sofar = 0;
     }
-    if (check_start_stop_switch()) {
-      if (motor_idle)
-        /* Spin up the motor a bit. */
-        start_open_loop(0.05f, 3.0f, 3.0f);
-    } else {
-      start_spin_down();
-    }
+    val = usb_packet[0];
 
-    //dbg_dump_samples();
+    if (val == POV_CMD_DEBUG)
+    {
+      handle_cmd_debug(usb_packet);
+      continue;
+    }
+    else if (val == POV_CMD_CONFIG)
+    {
+      if (usb_packet[1] == POV_SUBCMD_SET_CONFIG)
+        handle_cmd_set_config(usb_packet);
+      else if (usb_packet[1] == POV_SUBCMD_KEYPRESSES)
+      {
+        if (usb_sofar == 0)
+        {
+          if (keydata_sofar + NRF_PACKET_SIZE <= BUF_SIZE_PAD)
+          {
+            memcpy(&nrf_frame_buffers[read_idx][keydata_sofar],
+                   usb_packet, NRF_PACKET_SIZE);
+            keydata_sofar += NRF_PACKET_SIZE;
+          }
+          if (!transmit_running)
+          {
+            nrf_write_idx = read_idx;
+            read_idx = (1 - read_idx);
+            transmit_start_keypresses(keydata_sofar);
+            keydata_sofar = 0;
+          }
+        }
+        else
+          serial_output_str("Skip key due to framedata\r\n");
+      }
+      continue;
+    }
+    else
+    {
+      serial_output_str("2D pov framebuffer transmit not implemnted in this "
+                        "version of pov_sender!\r\n");
+    }
   }
 }

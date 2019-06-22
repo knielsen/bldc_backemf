@@ -39,19 +39,27 @@ SECTIONS
         _etext = .;
     } > FLASH
 
+    .bss :
+    {
+        /*
+	   Let's put stack at start of RAM. This way if we overrun we should
+	   get a bus error or at least read bad data, and thus hopefully detect
+	   the problem more reliably than if overwriting random data.
+        */
+	_stack = .;
+	. = . + 2048;
+	_estack = .;
+        _bss = .;
+        *(.bss*)
+        *(COMMON)
+        _ebss = .;
+    } > SRAM
+
     .data : AT(ADDR(.text) + SIZEOF(.text))
     {
         _data = .;
         *(vtable)
         *(.data*)
         _edata = .;
-    } > SRAM
-
-    .bss :
-    {
-        _bss = .;
-        *(.bss*)
-        *(COMMON)
-        _ebss = .;
     } > SRAM
 }
