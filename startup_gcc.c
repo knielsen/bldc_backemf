@@ -36,6 +36,10 @@ static void FaultISR(void);
 static void IntDefaultHandler(void);
 
 /* Interrupts */
+extern void IntHandlerGPIOb(void);
+extern void IntHandlerSSI1(void);
+extern void IntHandlerTimer2A(void);
+extern void USB0DeviceIntHandler(void);
 extern void IntHandlerTimer3A(void);
 extern void IntHandlerTimer3B(void);
 extern void IntHandlerTimer4A(void);
@@ -43,6 +47,8 @@ extern void IntHandlerTimer4B(void);
 extern void IntHandlerTimer5A(void);
 extern void IntHandlerADC0Seq0(void);
 extern void IntHandlerADC1Seq0(void);
+extern void IntHandlerSSI0(void);
+extern void IntHandlerTimer1B(void);
 
 //*****************************************************************************
 //
@@ -91,7 +97,7 @@ void (* const g_pfnVectors[])(void) =
     IntDefaultHandler,                      // GPIO Port E
     IntDefaultHandler,                      // UART0 Rx and Tx
     IntDefaultHandler,                      // UART1 Rx and Tx
-    IntDefaultHandler,                      // SSI0 Rx and Tx
+    IntHandlerSSI0,                         // SSI0 Rx and Tx
     IntDefaultHandler,                      // I2C0 Master and Slave
     IntDefaultHandler,                      // PWM Fault
     IntDefaultHandler,                      // PWM Generator 0
@@ -106,7 +112,7 @@ void (* const g_pfnVectors[])(void) =
     IntDefaultHandler,                      // Timer 0 subtimer A
     IntDefaultHandler,                      // Timer 0 subtimer B
     IntDefaultHandler,                      // Timer 1 subtimer A
-    IntDefaultHandler,                      // Timer 1 subtimer B
+    IntHandlerTimer1B,                      // Timer 1 subtimer B
     IntDefaultHandler,                      // Timer 2 subtimer A
     IntDefaultHandler,                      // Timer 2 subtimer B
     IntDefaultHandler,                      // Analog Comparator 0

@@ -13,7 +13,6 @@
 #include "driverlib/adc.h"
 
 #include "dbg.h"
-#include "led.h"
 
 
 /*
@@ -71,6 +70,10 @@
 
 /* L6234 adds 300 ns of deadtime. */
 #define DEADTIME (MCU_HZ/1000*300/1000000)
+
+
+/* Control block for DMA. */
+uint32_t udma_control_block[256] __attribute__ ((aligned(1024)));
 
 
 /*
@@ -1262,6 +1265,7 @@ int main()
 {
   uint32_t last_time;
   uint32_t led_state;
+  uint32_t i;
 
   /* Use the full 80MHz system clock. */
   ROM_SysCtlClockSet(SYSCTL_SYSDIV_2_5 | SYSCTL_USE_PLL |
@@ -1281,9 +1285,13 @@ int main()
   ROM_IntPrioritySet(INT_TIMER3B, 2 << 5);
   ROM_IntPrioritySet(INT_ADC0SS0, 1 << 5);
   ROM_IntPrioritySet(INT_ADC1SS0, 1 << 5);
+  /* Playstation DualShock interrupt priority. */
+  ROM_IntPrioritySet(INT_SSI0, 3 << 5);
+  ROM_IntPrioritySet(INT_TIMER1B, 5 << 5);
 
   setup_controlpanel();
-  config_ssi_gpio();
+  setup_ps2();
+  setup_nrf();
 
   setup_adc_basic();
   setup_manual_l6234();
@@ -1295,6 +1303,8 @@ int main()
   setup_adc_timer_interrupts();
   setup_timer_pwm();
   setup_systick();
+
+  start_ps2_interrupts();
 
   serial_output_str("Motor controller init done\r\n");
 
@@ -1334,6 +1344,12 @@ int main()
       start_spin_down();
     }
 
+    serial_output_str("  PS2:");
+    for (i = 0; i < sizeof(ps2_button_state); ++i) {
+      serial_output_str(" ");
+      serial_output_hexbyte(ps2_button_state[i]);
+    }
+    serial_output_str("\n");
     //dbg_dump_samples();
   }
 }

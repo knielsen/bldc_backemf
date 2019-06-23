@@ -1,5 +1,11 @@
 #include "bldc_backemf.h"
 
+#include "inc/hw_ssi.h"
+#include "inc/hw_ints.h"
+#include "driverlib/udma.h"
+#include "driverlib/ssi.h"
+
+
 /*
   Note that to change these, may require additional changes in
   config_ssi_gpio() and in IRQ handler setup.
@@ -33,7 +39,7 @@
 #define KEY_RETRANSMITS 8
 
 
-void
+static void
 config_ssi_gpio(void)
 {
   /* Config Tx on SSI1, PF0-PF3 + PB0/PB3. */
@@ -60,4 +66,63 @@ config_ssi_gpio(void)
   ROM_GPIOPinWrite(NRF_CE_BASE, NRF_CE_PIN, 0);
   /* IRQ pin as input. */
   ROM_GPIOPinTypeGPIOInput(NRF_IRQ_BASE, NRF_IRQ_PIN);
+}
+
+static void
+config_spi(void)
+{
+  /*
+    Configure the SPI for correct mode to read from nRF24L01+.
+
+    We need CLK inactive low, so SPO=0.
+    We need to setup and sample on the leading, rising CLK edge, so SPH=0.
+
+    The datasheet says up to 10MHz SPI is possible, depending on load
+    capacitance. Let's go with a slightly cautious 8MHz, which should be
+    aplenty.
+  */
+
+  uint32_t base = NRF_SSI_BASE;
+  ROM_SSIDisable(base);
+  ROM_SSIConfigSetExpClk(base, ROM_SysCtlClockGet(), SSI_FRF_MOTO_MODE_0,
+                         SSI_MODE_MASTER, 8000000, 8);
+  ROM_SSIEnable(base);
+}
+
+
+static void
+config_udma_for_spi(void)
+{
+  ROM_SysCtlPeripheralEnable(SYSCTL_PERIPH_UDMA);
+  ROM_uDMAEnable();
+  ROM_uDMAControlBaseSet(udma_control_block);
+
+  ROM_SSIDMAEnable(NRF_SSI_BASE, SSI_DMA_TX);
+  ROM_SSIDMAEnable(NRF_SSI_BASE, SSI_DMA_RX);
+  ROM_IntEnable(INT_SSI1);
+
+  ROM_uDMAChannelAttributeDisable(NRF_DMA_CH_TX, UDMA_ATTR_ALTSELECT |
+                                  UDMA_ATTR_REQMASK | UDMA_ATTR_HIGH_PRIORITY);
+  ROM_uDMAChannelAssign(UDMA_CH25_SSI1TX);
+  ROM_uDMAChannelAttributeEnable(NRF_DMA_CH_TX, UDMA_ATTR_USEBURST);
+  ROM_uDMAChannelControlSet(NRF_DMA_CH_TX | UDMA_PRI_SELECT,
+                            UDMA_SIZE_8 | UDMA_SRC_INC_8 | UDMA_DST_INC_NONE |
+                            UDMA_ARB_4);
+
+  ROM_uDMAChannelAttributeDisable(NRF_DMA_CH_RX, UDMA_ATTR_ALTSELECT |
+                                  UDMA_ATTR_REQMASK | UDMA_ATTR_HIGH_PRIORITY);
+  ROM_uDMAChannelAssign(UDMA_CH24_SSI1RX);
+  ROM_uDMAChannelAttributeEnable(NRF_DMA_CH_RX, UDMA_ATTR_USEBURST);
+  ROM_uDMAChannelControlSet(NRF_DMA_CH_RX | UDMA_PRI_SELECT,
+                            UDMA_SIZE_8 | UDMA_DST_INC_8 | UDMA_SRC_INC_NONE |
+                            UDMA_ARB_4);
+}
+
+
+void
+setup_nrf(void)
+{
+  config_ssi_gpio();
+  config_spi();
+  config_udma_for_spi();
 }
