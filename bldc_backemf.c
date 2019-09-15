@@ -1352,7 +1352,7 @@ usb_get_packet(uint8_t *packet_buf, uint32_t max_reset_count,
       {
         last_button_time = cur_time;
         check_buttons();
-#if 1
+#if 0
         {
           uint32_t i;
           for (i = 0 ; i < 19; ++i)
