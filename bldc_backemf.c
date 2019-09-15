@@ -97,6 +97,7 @@
 /* L6234 adds 300 ns of deadtime. */
 #define DEADTIME (MCU_HZ/1000*300/1000000)
 
+//#define BIAS_VERBOSE
 
 /* Control block for DMA. */
 uint32_t udma_control_block[256] __attribute__ ((aligned(1024)));
@@ -993,16 +994,20 @@ measure_voltage_divider_bias(void)
 
     for (j = 0; j < 3; ++j) {
       uint32_t chan;
+      const char *which;
 
       switch (j)  {
       case 0:
         chan = 1;
+        which = "A";
         break;
       case 1:
         chan = 0;
+        which = "B";
         break;
       case 2:
         chan = 10;
+        which = "C";
         break;
       }
 
@@ -1010,6 +1015,8 @@ measure_voltage_divider_bias(void)
       serial_output_str("Start measure on phase ");
       serial_output_str(which);
       serial_output_str("\r\n");
+#else
+    (void)which;                                /* Silence compiler warning */
 #endif
       /* Read phase and neutral. */
       HWREG(ADC0_BASE + ADC_O_SSMUX0) = chan * (uint32_t)0x11111111;
@@ -1447,8 +1454,8 @@ delay_us(uint32_t us)
 
   while (cycles > 0xffffff)
   {
-    delay_systicks(0xffffff);
-    cycles -= 0xffffff;
+    delay_systicks(0xffffff/2);
+    cycles -= 0xffffff/2;
   }
   delay_systicks(cycles);
 }
