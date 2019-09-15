@@ -15,6 +15,24 @@
 
 
 static void
+setup_controlpanel(void)
+{
+
+  /* Switch 1, 2, and 3 on PA6, PC4, and PC7. */
+  ROM_SysCtlPeripheralEnable(SYSCTL_PERIPH_GPIOA);
+  ROM_SysCtlGPIOAHBEnable(SYSCTL_PERIPH_GPIOA);
+  ROM_SysCtlPeripheralEnable(SYSCTL_PERIPH_GPIOC);
+  ROM_SysCtlGPIOAHBEnable(SYSCTL_PERIPH_GPIOC);
+  ROM_GPIODirModeSet(GPIO_PORTA_AHB_BASE, GPIO_PIN_6, GPIO_DIR_MODE_IN);
+  ROM_GPIOPadConfigSet(GPIO_PORTA_AHB_BASE, GPIO_PIN_6,
+                       GPIO_STRENGTH_2MA, GPIO_PIN_TYPE_STD_WPU);
+  ROM_GPIODirModeSet(GPIO_PORTC_AHB_BASE, GPIO_PIN_4|GPIO_PIN_7, GPIO_DIR_MODE_IN);
+  ROM_GPIOPadConfigSet(GPIO_PORTC_AHB_BASE, GPIO_PIN_4|GPIO_PIN_7,
+                       GPIO_STRENGTH_2MA, GPIO_PIN_TYPE_STD_WPU);
+}
+
+
+static void
 config_spi_ps2(void)
 {
   ROM_SysCtlPeripheralEnable(SYSCTL_PERIPH_SSI0);
@@ -288,10 +306,10 @@ void
 check_buttons(void)
 {
   uint32_t ps2_but_status1;
-  long pa = my_gpio_read(GPIO_PORTA_BASE, 0x40);
-  long pc = my_gpio_read(GPIO_PORTC_BASE, 0x90);
+  long pa = my_gpio_read(GPIO_PORTA_AHB_BASE, 0x40);
+  long pc = my_gpio_read(GPIO_PORTC_AHB_BASE, 0x90);
   uint8_t status =
-    ((pc << 1) & 0x20) | ((pc >> 1) & 0x40) | ((pa << 1) & 0x80);
+    ~( ((pc << 1) & 0x20) | ((pc >> 1) & 0x40) | ((pa << 1) & 0x80) | 0x1f);
   button_status[1] = ~ps2_button_state[0];
   button_status[2] = ~ps2_button_state[1];
   memcpy(button_status+3, ps2_button_state+2, 16);
@@ -320,6 +338,7 @@ check_buttons(void)
 void
 setup_ps2(void)
 {
+  setup_controlpanel();
   config_spi_ps2();
   config_udma_for_ps2();
 }

@@ -113,24 +113,6 @@ static float phase_factor[4];
 static void motor_update(void);
 
 
-static void
-setup_controlpanel(void)
-{
-
-  /* Switch 1 & 3 on PC4 & PA6. */
-  ROM_SysCtlPeripheralEnable(SYSCTL_PERIPH_GPIOA);
-  ROM_SysCtlGPIOAHBEnable(SYSCTL_PERIPH_GPIOA);
-  ROM_SysCtlPeripheralEnable(SYSCTL_PERIPH_GPIOC);
-  ROM_SysCtlGPIOAHBEnable(SYSCTL_PERIPH_GPIOC);
-  ROM_GPIODirModeSet(GPIO_PORTA_AHB_BASE, GPIO_PIN_6, GPIO_DIR_MODE_IN);
-  ROM_GPIOPadConfigSet(GPIO_PORTA_AHB_BASE, GPIO_PIN_6,
-                       GPIO_STRENGTH_2MA, GPIO_PIN_TYPE_STD_WPU);
-  ROM_GPIODirModeSet(GPIO_PORTC_AHB_BASE, GPIO_PIN_4, GPIO_DIR_MODE_IN);
-  ROM_GPIOPadConfigSet(GPIO_PORTC_AHB_BASE, GPIO_PIN_4,
-                       GPIO_STRENGTH_2MA, GPIO_PIN_TYPE_STD_WPU);
-}
-
-
 /*
   Set up initial config of GPIOs connected to L6234 motor controller.
   This allows to do initial "manual" control.
@@ -1370,7 +1352,7 @@ usb_get_packet(uint8_t *packet_buf, uint32_t max_reset_count,
       {
         last_button_time = cur_time;
         check_buttons();
-#if 0
+#if 1
         {
           uint32_t i;
           for (i = 0 ; i < 19; ++i)
@@ -1635,7 +1617,6 @@ int main()
   ROM_IntPrioritySet(INT_USB0, 5 << 5);
 
   setup_systick();
-  setup_controlpanel();
   setup_ps2();
   setup_nrf();
   config_usb();

@@ -944,7 +944,7 @@ handle_end_of_transmit_burst(void)
 void
 IntHandlerGPIOb(void)
 {
-  uint32_t irq_status = HWREG(GPIO_PORTB_BASE + GPIO_O_MIS) & 0xff;
+  uint32_t irq_status = HWREG(GPIO_PORTB_AHB_BASE + GPIO_O_MIS) & 0xff;
   if (irq_status & NRF_IRQ_PIN)
   {
     if (transmit_multi_running)
@@ -958,8 +958,8 @@ IntHandlerGPIOb(void)
         Clear the interrupt request and disable further interrupts until we can
         clear the request from the device over SPI.
       */
-      HWREG(GPIO_PORTB_BASE + GPIO_O_IM) &= ~NRF_IRQ_PIN & 0xff;
-      HWREG(GPIO_PORTB_BASE + GPIO_O_ICR) = NRF_IRQ_PIN;
+      HWREG(GPIO_PORTB_AHB_BASE + GPIO_O_IM) &= ~NRF_IRQ_PIN & 0xff;
+      HWREG(GPIO_PORTB_AHB_BASE + GPIO_O_ICR) = NRF_IRQ_PIN;
 
       serial_output_str("Tx: IRQ: TX_DS (spurious)\r\n");
     }
