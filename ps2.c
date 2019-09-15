@@ -1,4 +1,5 @@
 #include "bldc_backemf.h"
+#include "dbg.h"
 #include "ps2.h"
 
 #include <string.h>
@@ -64,7 +65,7 @@ config_spi_ps2(void)
 #define R_(x) ((((x)&0x1) << 7) | (((x)&0x2) << 5) | (((x)&0x4) << 3) | \
                (((x)&0x8) << 1) | (((x)&0x10) >> 1) | (((x)&0x20) >> 3) \
                | (((x)&0x50) >> 5) | (((x)&0x80) >> 7))
-static const struct { uint32_t len; uint8_t data[21]; } ps2_cmds[] = {
+struct { uint32_t len; uint8_t data[21]; } ps2_cmds[] = {
   /* Do an initial poll to check response and detect missing controller. */
   { 5, { R_(0x01), R_(0x42), 0, 0, 0}},
   /* Enter config/escape mode. */
@@ -143,7 +144,7 @@ IntHandlerSSI0(void)
 void
 IntHandlerTimer1B(void)
 {
-  const uint8_t *ps2_data;
+  uint8_t *ps2_data;
   uint32_t ps2_data_len;
   uint32_t idx;
 
@@ -169,7 +170,7 @@ IntHandlerTimer1B(void)
                              ps2_recvbuf, ps2_data_len);
   ROM_uDMAChannelEnable(UDMA_CH10_SSI0RX);
   ROM_uDMAChannelTransferSet(UDMA_CH20_TIMER1A | UDMA_PRI_SELECT,
-                             UDMA_MODE_BASIC, (void *)ps2_data,
+                             UDMA_MODE_BASIC, ps2_data,
                              (void *)(SSI0_BASE + SSI_O_DR), ps2_data_len);
   ROM_uDMAChannelEnable(UDMA_CH20_TIMER1A);
   my_enable_timera(TIMER1_BASE);

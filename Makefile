@@ -38,7 +38,7 @@ dbg.o: dbg.c dbg.h
 led.o: bldc_backemf.h
 usb.o: bldc_backemf.h usb.h
 nrf.o: bldc_backemf.h nrf.h dbg.h
-ps2.o: bldc_backemf.h ps2.h
+ps2.o: bldc_backemf.h ps2.h dbg.h
 usb_serial_structs.o: usb_serial_structs.h
 
 %.o: %.c
