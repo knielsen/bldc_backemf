@@ -1,4 +1,5 @@
 #include "bldc_backemf.h"
+#include "ps2.h"
 
 #include <string.h>
 #include <stdlib.h>
@@ -55,63 +56,6 @@ config_spi_ps2(void)
 }
 
 
-static inline void
-my_disable_timera(unsigned long timer_base)
-{
-  //HWREG(timer_base + TIMER_O_CTL) &= ~(uint32_t)TIMER_CTL_TAEN;
-  hw_clear_bit(timer_base + TIMER_O_CTL, 0);
-}
-
-
-static inline void
-my_disable_timerb(unsigned long timer_base)
-{
-  //HWREG(timer_base + TIMER_O_CTL) &= ~(uint32_t)TIMER_CTL_TBEN;
-  hw_clear_bit(timer_base + TIMER_O_CTL + 1, 0);
-}
-
-
-static inline void
-my_enable_timera(unsigned long timer_base)
-{
-  //HWREG(timer_base + TIMER_O_CTL) |= (uint32_t)TIMER_CTL_TAEN;
-  hw_set_bit(timer_base + TIMER_O_CTL, 0);
-}
-
-
-static inline void
-my_enable_timerb(unsigned long timer_base)
-{
-  //HWREG(timer_base + TIMER_O_CTL) |= (uint32_t)TIMER_CTL_TBEN;
-  hw_set_bit(timer_base + TIMER_O_CTL + 1, 0);
-}
-
-
-static inline void
-my_clear_timera_timeout_int(unsigned long timer_base)
-{
-  //HWREG(timer_base + TIMER_O_ICR) = TIMER_TIMA_TIMEOUT;
-  hw_set_bit(timer_base + TIMER_O_ICR, 0);
-}
-
-
-static inline void
-my_clear_timerb_timeout_int(unsigned long timer_base)
-{
-  //HWREG(timer_base + TIMER_O_ICR) = TIMER_TIMB_TIMEOUT;
-  hw_set_bit(timer_base + TIMER_O_ICR + 1, 0);
-}
-
-
-static inline uint8_t RBIT(uint8_t byte_val)
-{
-  uint32_t res;
-  uint32_t word_val = byte_val;
-  __asm ("rbit %0, %1" : "=r" (res) : "r" (word_val));
-  return res>>24;
-}
-
-
 /*
   The Tiva SSI peripheral uses MSB first, but DualShock controller needs LSB
   first. This compile-time macro allows to bitflip a constant value as needed.
@@ -120,7 +64,7 @@ static inline uint8_t RBIT(uint8_t byte_val)
 #define R_(x) ((((x)&0x1) << 7) | (((x)&0x2) << 5) | (((x)&0x4) << 3) | \
                (((x)&0x8) << 1) | (((x)&0x10) >> 1) | (((x)&0x20) >> 3) \
                | (((x)&0x50) >> 5) | (((x)&0x80) >> 7))
-struct { uint32_t len; uint8_t data[21]; } ps2_cmds[] = {
+static const struct { uint32_t len; uint8_t data[21]; } ps2_cmds[] = {
   /* Do an initial poll to check response and detect missing controller. */
   { 5, { R_(0x01), R_(0x42), 0, 0, 0}},
   /* Enter config/escape mode. */
@@ -199,7 +143,7 @@ IntHandlerSSI0(void)
 void
 IntHandlerTimer1B(void)
 {
-  uint8_t *ps2_data;
+  const uint8_t *ps2_data;
   uint32_t ps2_data_len;
   uint32_t idx;
 
@@ -225,7 +169,7 @@ IntHandlerTimer1B(void)
                              ps2_recvbuf, ps2_data_len);
   ROM_uDMAChannelEnable(UDMA_CH10_SSI0RX);
   ROM_uDMAChannelTransferSet(UDMA_CH20_TIMER1A | UDMA_PRI_SELECT,
-                             UDMA_MODE_BASIC, ps2_data,
+                             UDMA_MODE_BASIC, (void *)ps2_data,
                              (void *)(SSI0_BASE + SSI_O_DR), ps2_data_len);
   ROM_uDMAChannelEnable(UDMA_CH20_TIMER1A);
   my_enable_timera(TIMER1_BASE);
@@ -279,6 +223,98 @@ config_udma_for_ps2(void)
                         UDMA_ARB_1);
   ROM_TimerIntEnable(TIMER1_BASE, TIMER_TIMB_TIMEOUT);
 }
+
+
+/*
+  Status of all buttons. There's some legacy here, there used to be a custom
+  PCB with a few buttons, then PS2 controller was added, and now the custom
+  PCB is gone and only 3 dip-switches remain from there.
+
+  All bits are active high.
+
+  Byte 0:
+   bit 0  button 1 (or "Left")
+   bit 1  button 2 (or "Right")
+   bit 2  button 2 (or "Down")
+   bit 3  button 2 (or "Up")
+   bit 4  button 2 (or SELECT)
+   bit 5  switch 1 (also on DualShock controller board)
+   bit 6  switch 2
+   bit 7  switch 3 (also on DualShock controller board)
+
+  Byte 1:
+   bit 0: SELECT
+   bit 1: L3
+   bit 2  R3
+   bit 3  START
+   bit 4  Up
+   bit 5  Right
+   bit 6  Down
+   bit 7  Left
+
+  Byte 2:
+   bit 0: L2
+   bit 1: R2
+   bit 2  L1
+   bit 3  R1
+   bit 4  Triangle
+   bit 5  Circle
+   bit 6  Cross
+   bit 7  Square
+
+  Byte 3: Joystick R left (0x00) -> right (0xff)
+  Byte 4: Joystick R up (0x00) -> down (0xff)
+  Byte 5: Joystick L left (0x00) -> right (0xff)
+  Byte 6: Joystick L up (0x00) -> down (0xff)
+
+  Byte 7: Button "right" pressure sensitivity
+  Byte 8: Button "left" pressure sensitivity
+  Byte 9: Button "up" pressure sensitivity
+  Byte 10: Button "down" pressure sensitivity
+  Byte 11: Button "triangle" pressure sensitivity
+  Byte 12: Button "circle" pressure sensitivity
+  Byte 13: Button "cross" pressure sensitivity
+  Byte 14: Button "square" pressure sensitivity
+  Byte 15: Button "L1" pressure sensitivity
+  Byte 16: Button "R1" pressure sensitivity
+  Byte 17: Button "L2" pressure sensitivity
+  Byte 18: Button "R2" pressure sensitivity
+*/
+uint8_t button_status[19];
+uint8_t prev_button_status[19];
+
+void
+check_buttons(void)
+{
+  uint32_t ps2_but_status1;
+  long pa = my_gpio_read(GPIO_PORTA_BASE, 0x40);
+  long pc = my_gpio_read(GPIO_PORTC_BASE, 0x90);
+  uint8_t status =
+    ((pc << 1) & 0x20) | ((pc >> 1) & 0x40) | ((pa << 1) & 0x80);
+  button_status[1] = ~ps2_button_state[0];
+  button_status[2] = ~ps2_button_state[1];
+  memcpy(button_status+3, ps2_button_state+2, 16);
+  ps2_but_status1 = button_status[1];
+  /* Let some DualShock buttons mirror the small panel buttons. */
+  status |= ((ps2_but_status1 >> 7) & 0x01);   /* Left */
+  status |= ((ps2_but_status1 >> 4) & 0x06);   /* Right/Down */
+  status |= ((ps2_but_status1 >> 1) & 0x08);   /* Up */
+  status |= ((ps2_but_status1 << 4) & 0x10);   /* Select */
+  button_status[0] = status;
+
+ /* ToDo: Some anti-prell handling here? */
+  if (status & (1<<7))
+  {
+    if (motor_idle)
+      start_motor();
+  }
+  else
+  {
+    if (!motor_idle)
+      stop_motor();
+  }
+}
+
 
 void
 setup_ps2(void)
