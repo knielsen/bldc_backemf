@@ -84,7 +84,7 @@
     usb0
 */
 
-#define DAMPER_VALUE 0.25f
+#define DAMPER_VALUE 0.2f
 
 /* Electric rotations per mechanical rotation. */
 #define ELECTRIC2MECHANICAL 6
@@ -93,6 +93,24 @@
 
 #define PWM_FREQ 25000
 #define PWM_PERIOD (MCU_HZ/PWM_FREQ)
+
+
+/*
+  Table for open-loop communation to start up from stationary state.
+  Back-emf only works when the motor is spinning at some minimum speed. So
+  initial startup is done from a fixed commutation pattern tuned to the
+  motor characteristics and load.
+*/
+static const struct {
+  float start_mech_rps, end_mech_rps, duration;
+} open_loop_startup_table[] = {
+  {0.05f, 0.3f, 1.0f},
+  {0.3f,  0.3f, 2.0f},
+  {0.3f,  2.5f, 5.0f},
+};
+#define STARTUP_TABLE_SIZE \
+    (sizeof(open_loop_startup_table)/sizeof(open_loop_startup_table[0]))
+static uint32_t startup_pos = 0;
 
 /* L6234 adds 300 ns of deadtime. */
 #define DEADTIME (MCU_HZ/1000*300/1000000)
@@ -1075,6 +1093,22 @@ measure_voltage_divider_bias(void)
 
 
 static void
+setup_open_loop_stage(void)
+{
+  float start_mech_rps = open_loop_startup_table[startup_pos].start_mech_rps;
+  float end_mech_rps = open_loop_startup_table[startup_pos].end_mech_rps;
+  float duration_sec = open_loop_startup_table[startup_pos].duration;
+
+  motor_set_current_speed(ELECTRIC2MECHANICAL*start_mech_rps);
+  motor_speed_change_start = motor_tick;
+  motor_speed_change_end =
+    motor_speed_change_start + (uint32_t)(PWM_FREQ*duration_sec + 0.5f);
+  motor_speed_start = motor_cur_speed;
+  motor_speed_end = ELECTRIC2MECHANICAL*end_mech_rps;
+}
+
+
+static void
 open_loop_adjust_speed(uint32_t l_motor_tick, uint32_t l_step)
 {
   /* Adjust speed as appropriate in open loop operation. */
@@ -1092,9 +1126,18 @@ open_loop_adjust_speed(uint32_t l_motor_tick, uint32_t l_step)
     frac_inc = 1.0f;
   new_speed = l_start + frac_inc*(l_end - l_start);
   motor_set_current_speed(new_speed);
-  /* Once target is reached, go to closed-loop operation. */
-  if (sofar >= range && l_step == 0)
-    motor_spinning_up = 0;
+  /* Once target is reached, go to the next startup stage. And when all
+     stages done, continue to closed-loop operation.
+  */
+  if (sofar >= range && l_step == 0) {
+    uint32_t next_pos = startup_pos + 1;
+    if (next_pos < STARTUP_TABLE_SIZE) {
+      startup_pos = next_pos;
+      setup_open_loop_stage();
+    } else {
+      motor_spinning_up = 0;
+    }
+  }
 }
 
 
@@ -1225,19 +1268,15 @@ motor_update()
 
 
 static void
-start_open_loop(float start_mech_rps, float end_mech_rps, float duration_sec)
+start_open_loop(void)
 {
   if (!motor_idle)
     return;
   if (motor_spinning_up || motor_spinning_down)
     return;
   motor_set_damper(DAMPER_VALUE);
-  motor_set_current_speed(ELECTRIC2MECHANICAL*start_mech_rps);
-  motor_speed_change_start = motor_tick;
-  motor_speed_change_end =
-    motor_speed_change_start + (uint32_t)(PWM_FREQ*duration_sec + 0.5f);
-  motor_speed_start = motor_cur_speed;
-  motor_speed_end = ELECTRIC2MECHANICAL*end_mech_rps;
+  startup_pos = 0;
+  setup_open_loop_stage();
   motor_spinning_up = 1;
   motor_idle = 0;
 }
@@ -1266,7 +1305,7 @@ start_motor(void)
   if (motor_idle)
   {
     /* Spin up the motor a bit. */
-    start_open_loop(0.05f, 3.0f, 3.0f);
+    start_open_loop();
   }
 }
 
