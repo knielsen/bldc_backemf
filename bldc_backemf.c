@@ -129,7 +129,7 @@ static float phase_factor[4];
 
 
 static void motor_update(void);
-
+static void start_spin_down(void);
 
 /*
   Set up initial config of GPIOs connected to L6234 motor controller.
@@ -858,6 +858,7 @@ static volatile uint32_t motor_spin_down_start = 0;
 static volatile uint32_t motor_spin_down_end = 0;
 static volatile uint32_t motor_spin_down_idle = 0;
 static volatile float motor_spin_down_initial_damper = 0;
+static volatile uint32_t pending_motor_stop = 0;
 
 /* Set the value of motor current speed, in electric RPS. */
 static void
@@ -915,6 +916,7 @@ motor_adjust_damper(uint32_t l_motor_tick, uint32_t l_step)
       motor_spinning_down = 0;
       motor_idle = 1;
       motor_adc_dbg = 0;
+      pending_motor_stop = 0;
     }
   }
 }
@@ -1136,6 +1138,10 @@ open_loop_adjust_speed(uint32_t l_motor_tick, uint32_t l_step)
       setup_open_loop_stage();
     } else {
       motor_spinning_up = 0;
+      if (pending_motor_stop) {
+        pending_motor_stop = 0;
+        start_spin_down();
+      }
     }
   }
 }
@@ -1274,6 +1280,7 @@ start_open_loop(void)
     return;
   if (motor_spinning_up || motor_spinning_down)
     return;
+  pending_motor_stop = 0;
   motor_set_damper(DAMPER_VALUE);
   startup_pos = 0;
   setup_open_loop_stage();
@@ -1282,11 +1289,15 @@ start_open_loop(void)
 }
 
 
-static void
+void
 start_spin_down(void)
 {
-  if (motor_spinning_down || motor_idle || motor_spinning_up)
+  if (motor_spinning_down || motor_idle)
     return;
+  if (motor_spinning_up) {
+    pending_motor_stop = 1;
+    return;
+  }
   motor_spin_down_start = motor_tick;
   motor_spin_down_initial_damper = motor_damper;
   /*

@@ -306,6 +306,8 @@ void
 check_buttons(void)
 {
   uint32_t ps2_but_status1;
+  uint8_t start_switch_status, start_button_status;
+  static uint8_t prev_start_switch_status = 0, prev_start_button_status = 0;
   long pa = my_gpio_read(GPIO_PORTA_AHB_BASE, 0x40);
   long pc = my_gpio_read(GPIO_PORTC_AHB_BASE, 0x90);
   uint8_t status =
@@ -321,17 +323,29 @@ check_buttons(void)
   status |= ((ps2_but_status1 << 4) & 0x10);   /* Select */
   button_status[0] = status;
 
- /* ToDo: Some anti-prell handling here? */
-  if (status & (1<<7))
+  /*
+    Motor can be controlled both by the dip-switch and the "START" PS2 button.
+    The motor is started by flipping the switch to the "on" position, or by
+    pressing START when the motor is currently stopped.
+    The motor is stopped by flipping the switch to the "off" position, or by
+    pressing START when it is running.
+  */
+  start_switch_status = status & (1<<7);
+  start_button_status = ps2_but_status1 & (1<<3);
+  if (motor_idle &&
+      ( (start_switch_status && !prev_start_switch_status) ||
+        (start_button_status && !prev_start_button_status) ))
   {
-    if (motor_idle)
-      start_motor();
+    start_motor();
   }
-  else
+  else if ( (!start_switch_status && prev_start_switch_status) ||
+            (!motor_idle &&
+             (start_button_status && !prev_start_button_status)) )
   {
-    if (!motor_idle)
-      stop_motor();
+    stop_motor();
   }
+  prev_start_switch_status = start_switch_status;
+  prev_start_button_status = start_button_status;
 }
 
 
